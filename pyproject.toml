@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repvblicvs-engine"
-version = "0.1.1"
+version = "0.1.2"
 description = "Persistent task and delivery operations for an AI-operated digital services business"
 requires-python = ">=3.12"
 license = "MIT"

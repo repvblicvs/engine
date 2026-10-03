@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 from repvblicvs_engine.executor import ProcessNotStarted, _run, classify_failure, command, run_model_instruction
+from repvblicvs_engine import agy_adapter
 from repvblicvs_engine.providers import Router
 from repvblicvs_engine.store import Store
 from repvblicvs_engine.workflows import WorkflowError
@@ -48,6 +49,99 @@ class ExecutorTests(unittest.TestCase):
             db.execute("INSERT INTO meta VALUES('codex_credit_policy',?)", (json.dumps(policy),))
         self.router.unavailable("opus", "not available")
         self.task["payload"]["preferred"] = "sol"
+
+    def configure_gemini(self, *, account_changes=None, provider_changes=None):
+        from test_agy_adapter import native_result
+        now = time.time()
+        self.agy_profile = {"profile_sha256": "synthetic-profile-sha", "use_g1_credits": False, "namespace_denials": sorted(agy_adapter.DENIALS), "tool_inventory_removed": False}
+        account = {"billing_mode": "included", "use_g1_credits": False, "credits_off_receipt": "synthetic-native-controls", "native_allowance": {"models": [agy_adapter.MODEL], "remaining_percent": 80, "observed_at": now - 1, "reset_at": now + 1000, "receipt": "synthetic-native-usage"}, **(account_changes or {})}
+        evidence = {"auth": "google_cached_oauth", "cli_version": agy_adapter.CLI_VERSION, "profile_verified": True, "profile_verified_at": now - 1, "profile_receipt": "synthetic-effective-profile", "profile_sha256": self.agy_profile["profile_sha256"], "use_g1_credits": False, **(provider_changes or {})}
+        self.router.configure_account("google", evidence=account, verified_until=self.until, remaining_calls=3)
+        self.router.configure_provider("gemini", "google", model=agy_adapter.MODEL, status="ready", verified_until=self.until, evidence=evidence)
+        self.task["payload"]["preferred"] = "gemini"
+        return native_result()
+
+    def test_gemini_exact_artifact_receipt_persists_and_reuses_after_entitlement_expiry(self):
+        response = self.configure_gemini()
+        with patch("repvblicvs_engine.agy_adapter.profile_snapshot", return_value=self.agy_profile), patch("repvblicvs_engine.executor.command", return_value=["synthetic-agy"]), patch("repvblicvs_engine.executor._run", return_value=response) as run:
+            result = run_model_instruction(self.store, self.task, self.output)
+        self.assertEqual(result["summary"]["provider"], "gemini")
+        self.assertEqual(result["summary"]["model"], agy_adapter.MODEL)
+        self.assertEqual(run.call_args.args[3:5], (90, 65536))
+        self.assertEqual(run.call_args.kwargs["log_path"], self.output / "agy-native.log")
+        self.assertTrue(result["evidence"][0]["adapter"]["tools_advertised"])
+        self.assertFalse(result["evidence"][0]["generated_code_executed"])
+        receipt = json.loads(next((self.store.root / "model_calls").glob("*.json")).read_text())
+        self.assertEqual(receipt["status"], "completed")
+        self.assertEqual(receipt["native_stream"], response["stdout"])
+        self.router.unavailable("gemini", "native quota needs refresh")
+        with patch("repvblicvs_engine.executor._run") as again, patch("repvblicvs_engine.agy_adapter.preflight") as preflight:
+            recovered = run_model_instruction(self.store, self.task, self.output)
+        self.assertEqual(recovered["summary"]["provider"], "gemini")
+        again.assert_not_called()
+        preflight.assert_not_called()
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT remaining_calls FROM accounts WHERE id='google'").fetchone()[0], 2)
+            cost = db.execute("SELECT * FROM costs WHERE provider='gemini'").fetchone()
+            self.assertEqual(cost["amount"], 0)
+            self.assertEqual(cost["included"], 1)
+
+    def test_unverified_gemini_native_quota_cannot_launch_worker(self):
+        self.configure_gemini(account_changes={"native_allowance": None})
+        self.router.unavailable("opus", "test unavailable")
+        self.router.unavailable("sol", "test unavailable")
+        with patch("repvblicvs_engine.executor._run") as run:
+            with self.assertRaises(WorkflowError): run_model_instruction(self.store, self.task, self.output)
+        run.assert_not_called()
+        self.assertEqual(list((self.store.root / "model_calls").glob("*.json")), [])
+
+    def test_gemini_failure_falls_back_with_original_requirements_and_packet(self):
+        from test_agy_adapter import native_result
+        self.configure_gemini()
+        response = native_result("quota exceeded", status="ERROR")
+        with patch("repvblicvs_engine.agy_adapter.profile_snapshot", return_value=self.agy_profile), patch("repvblicvs_engine.executor.command", side_effect=lambda *args: [args[0]]), patch("repvblicvs_engine.executor._run", side_effect=[response, opus_result()]) as run:
+            result = run_model_instruction(self.store, self.task, self.output)
+        self.assertEqual(result["summary"]["provider"], "opus")
+        self.assertEqual(run.call_args_list[0].args[1], run.call_args_list[1].args[1])
+        self.assertIn("Return a concise answer", run.call_args_list[0].args[1])
+        self.assertEqual(next(provider for provider in self.router.list() if provider["name"] == "gemini")["account_status"], "exhausted")
+
+    def test_gemini_tool_activity_and_incomplete_stream_cannot_replay_or_fallback(self):
+        from test_agy_adapter import native_result
+        for failure in (native_result(step_type="tool_call"), {"exit_code": -9, "stdout": "partial", "stderr": "", "failure": "timeout"}):
+            with self.subTest(failure=failure["failure"]):
+                self.configure_gemini()
+                task = self.store.enqueue({"kind": "model_instruction", "payload": {"prompt": "Synthetic distinct request " + str(failure["failure"]), "preferred": "gemini"}})
+                with patch("repvblicvs_engine.agy_adapter.profile_snapshot", return_value=self.agy_profile), patch("repvblicvs_engine.executor.command", return_value=["synthetic-agy"]), patch("repvblicvs_engine.executor._run", return_value=failure) as run:
+                    for _ in range(2):
+                        with self.assertRaisesRegex(WorkflowError, "ambiguous"):
+                            run_model_instruction(self.store, task, self.output)
+                self.assertEqual(run.call_count, 1)
+
+    def test_gemini_envelope_refuses_oversize_without_mutating_requirements(self):
+        self.configure_gemini()
+        self.router.unavailable("opus", "test unavailable")
+        self.router.unavailable("sol", "test unavailable")
+        for extra in ({"timeout_seconds": 91}, {"max_output_bytes": 65537}, {"prompt": "x" * 19900}):
+            with self.subTest(extra=extra):
+                self.task["payload"] = {"prompt": "Synthetic request", "preferred": "gemini", **extra}
+                original = dict(self.task["payload"])
+                with patch("repvblicvs_engine.agy_adapter.profile_snapshot", return_value=self.agy_profile), patch("repvblicvs_engine.executor._run") as run:
+                    with self.assertRaisesRegex(WorkflowError, "requirements preserved"):
+                        run_model_instruction(self.store, self.task, self.output)
+                run.assert_not_called()
+                self.assertEqual(self.task["payload"], original)
+
+    def test_native_log_growth_is_bounded_and_does_not_become_success(self):
+        log_path = self.output / "synthetic-native.log"
+        script = "import pathlib,time,sys; pathlib.Path(sys.argv[1]).write_text('x'*20000); time.sleep(10)"
+        result = _run([sys.executable, "-c", script, str(log_path)], "", self.output, 5, 10000, log_path=log_path)
+        self.assertEqual(result["failure"], "log_output_limit")
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertLessEqual(log_path.stat().st_size, 10000)
+        result = _run([sys.executable, "-c", "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text('x'*20000)", str(log_path)], "", self.output, 5, 10000, log_path=log_path)
+        self.assertEqual(result["failure"], "log_output_limit")
+        self.assertLessEqual(log_path.stat().st_size, 10000)
 
     def test_opus_answer_is_untrusted_artifact_and_completed_receipt_reused(self):
         with patch("repvblicvs_engine.executor._run", return_value=opus_result()) as run, patch("repvblicvs_engine.executor.shutil.which", return_value="/fake/claude"):
