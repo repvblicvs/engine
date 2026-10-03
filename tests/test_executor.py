@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from repvblicvs_engine.executor import ProcessNotStarted, _run, command, run_model_instruction
+from repvblicvs_engine.executor import ProcessNotStarted, _run, classify_failure, command, run_model_instruction
 from repvblicvs_engine.providers import Router
 from repvblicvs_engine.store import Store
 from repvblicvs_engine.workflows import WorkflowError
@@ -278,9 +278,21 @@ class ExecutorTests(unittest.TestCase):
             opus, sol = command("opus"), command("sol")
         self.assertEqual(opus[opus.index("--tools") + 1], "")
         self.assertIn("--safe-mode", opus)
-        self.assertIn("--ignore-user-config", sol)
-        self.assertIn("shell_tool", sol)
-        self.assertEqual(sol[sol.index("--sandbox") + 1], "read-only")
+        self.assertEqual(sol[1:], ["app-server", "--listen", "stdio://"])
+
+    def test_explicit_chatgpt_model_rejection_is_capability_and_falls_back(self):
+        self.authorize_existing_credits()
+        failure = {"exit_code": 1, "stdout": "", "stderr": "HTTP 400: The gpt-6.1-sol model is not supported when using Codex with a ChatGPT account", "failure": None}
+        self.assertEqual(classify_failure(failure), "capability")
+        self.router.configure_provider("opus", "claude", model="claude-opus-5-5", status="ready", verified_until=self.until, evidence={"paid_usage_disabled": True, "auto_reload_disabled": True, "auth": "oauth"})
+        with patch("repvblicvs_engine.allowance.read_live_limits", side_effect=[credit_limits(), credit_limits()]), patch("repvblicvs_engine.executor._run", side_effect=[failure, opus_result()]), patch("repvblicvs_engine.executor.command", side_effect=lambda *args: [args[0]]):
+            result = run_model_instruction(self.store, self.task, self.output)
+        self.assertEqual(result["summary"]["provider"], "opus")
+        receipts = [json.loads(path.read_text()) for path in (self.store.root / "model_calls").glob("*.json")]
+        failed = next(receipt for receipt in receipts if receipt["provider"] == "sol")
+        self.assertEqual(failed["classification"], "capability")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["billing_mode"], "authorized_existing_credits")
 
     def test_real_subprocess_output_cap_and_deadline(self):
         result = _run([sys.executable, "-c", "print('x'*200000)"], "", self.output, 5, 10000)

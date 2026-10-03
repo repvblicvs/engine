@@ -73,8 +73,7 @@ def command(provider: str, prompt: str = "", usage_path: Path | None = None) -> 
             raise WorkflowError("capability_unavailable", "Claude executable unavailable")
         return [binary, "-p", "--model", SUPPORTED[provider], "--effort", "low", "--tools", "", "--safe-mode", "--no-chrome", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--output-format", "json"]
     if provider == "sol":
-        disabled = ["shell_tool", "unified_exec", "apps", "plugins", "computer_use", "browser_use", "browser_use_external", "browser_use_full_cdp_access", "multi_agent", "multi_agent_v2", "code_mode_host", "hooks", "image_generation", "view_image", "memories", "skill_search", "goals"]
-        return [codex_binary(), "exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "-m", SUPPORTED[provider], "--json", *[argument for feature in disabled for argument in ("--disable", feature)], "-"]
+        return [codex_binary(), "app-server", "--listen", "stdio://"]
     if provider == "copilot":
         binary = os.environ.get("REPVBLICVS_COPILOT_BIN") or shutil.which("copilot")
         if not binary or usage_path is None:
@@ -84,8 +83,14 @@ def command(provider: str, prompt: str = "", usage_path: Path | None = None) -> 
     raise WorkflowError("capability_unavailable", "Provider has no verified artifact-only adapter")
 
 
-def _run(argv: list[str], prompt: str, cwd: Path, timeout: float, maximum: int, inherited_fds=()) -> dict:
+def _run(argv: list[str], prompt: str, cwd: Path, timeout: float, maximum: int, inherited_fds=(), *, allowance_observed_at=None) -> dict:
     """Bound output while draining both pipes; kill the process group on timeout."""
+    if len(argv) > 1 and argv[1] == "app-server":
+        from .codex_adapter import AdapterError, AdapterSpawnFailure, run
+        try:
+            return run(argv, prompt, timeout, maximum, inherited_fds, allowance_observed_at=allowance_observed_at)
+        except (AdapterSpawnFailure, AdapterError, FileNotFoundError) as exc:
+            raise ProcessNotStarted("Isolated Codex context could not start a model request") from exc
     try:
         process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=safe_environment(), start_new_session=True, pass_fds=tuple(inherited_fds))
     except OSError as exc:
@@ -158,7 +163,7 @@ def classify_failure(result: dict) -> str:
         return "network"
     if any(token in text for token in ("context window", "context length", "too many tokens", "context_length")):
         return "context"
-    if any(token in text for token in ("model not found", "model unavailable", "model_not_found", "unsupported model", "unknown option", "not authorized", "authentication")):
+    if any(token in text for token in ("model not found", "model unavailable", "model capability unavailable", "model_not_found", "unsupported model", "model_not_supported", "model is not supported", "not supported when using codex with a chatgpt account", "unknown option", "not authorized", "authentication")):
         return "capability"
     return "ambiguous"
 
@@ -187,7 +192,10 @@ def _response(provider: str, result: dict) -> tuple[str, dict]:
     finished = next((event for event in reversed(events) if event.get("type") == "turn.completed"), None)
     if not finished or not messages:
         raise ValueError("Codex response is missing a completed answer")
-    return "\n\n".join(messages), {"provider": provider, "model": SUPPORTED[provider], "included_allowance": True, "paid_charge_recorded": 0, "usage": finished.get("usage", {})}
+    adapter = result.get("sol_adapter_evidence", {})
+    if adapter and (adapter.get("configured_model") != SUPPORTED[provider] or adapter.get("requested_model") != SUPPORTED[provider]):
+        raise ValueError("Codex model identity differs from the authorized route")
+    return "\n\n".join(messages), {"provider": provider, "model": SUPPORTED[provider], "included_allowance": True, "paid_charge_recorded": 0, "usage": finished.get("usage", {}), "adapter": adapter, "model_identity_basis": "exact requested and configured route; no provider substitution permitted"}
 
 
 def _sol_billing_evidence(snapshot: dict | None) -> dict:
@@ -315,7 +323,7 @@ def run_model_instruction(store, task: dict, output_dir: Path, *, inherited_fds=
             billing_evidence = _sol_billing_evidence(preflight) if provider_name == "sol" else {}
             _atomic_json(receipt, {"status": "dispatching", "provider": provider_name, "call_id": call_id, "generation": generation, "prompt_digest": digest, "started": time.time(), **billing_evidence})
             try:
-                result = _run(argv, prompt, output_dir, call_timeout, call_maximum, (*inherited_fds, lock_fd))
+                result = _run(argv, prompt, output_dir, call_timeout, call_maximum, (*inherited_fds, lock_fd), allowance_observed_at=preflight.get("observed_at") if isinstance(preflight, dict) else None)
                 if provider_name == "copilot" and usage_path.exists() and usage_path.stat().st_size <= 1_000_000:
                     result["copilot_usage"] = json.loads(usage_path.read_text())
             except ProcessNotStarted:
