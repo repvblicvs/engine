@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repvblicvs-engine"
+version = "0.1.0"
+description = "Persistent task and delivery operations for an AI-operated digital services business"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{name = "Repvblicvs"}]
+readme = "README.md"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+repvblicvs = "repvblicvs_engine.cli:main"
+repvblicvs-mcp = "repvblicvs_engine.mcp:main"
+repvblicvs-operator = "repvblicvs_engine.operator:main"
+repvblicvs-json = "repvblicvs_engine._vendor.json_preflight:main"
+repvblicvs-catalog = "repvblicvs_engine._vendor.catalog_csv:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"repvblicvs_engine._vendor" = ["*.json", "*.txt"]

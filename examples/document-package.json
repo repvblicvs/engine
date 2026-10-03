@@ -1,0 +1,8 @@
+{
+  "kind": "document_package",
+  "priority": 100,
+  "payload": {
+    "title": "Synthetic delivery brief",
+    "content": "# Scope\nProduce a standalone report from supplied source material.\n\n# Findings\nThis fixture demonstrates packaging and structure validation.\n\n# Acceptance\nHTML and Markdown must include the approved scope and contain no executable customer content."
+  }
+}

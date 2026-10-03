@@ -1,0 +1,4 @@
+ name , team , amount , note
+ Ada , North , 12.50 , first delivery
+ Lin , South , -2.50 , adjustment
+ Ada , North , 12.50 , duplicate intentionally preserved

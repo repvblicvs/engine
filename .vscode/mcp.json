@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "repvblicvs-engine": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/bin/repvblicvs-mcp",
+      "env": {"REPVBLICVS_STATE_DIR": "${env:HOME}/Library/Application Support/Repvblicvs/engine"}
+    }
+  }
+}

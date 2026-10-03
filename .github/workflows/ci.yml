@@ -1,0 +1,36 @@
+name: release checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install '.[test]'
+      - run: python -m pytest -q
+      - name: build and install released package in a clean environment
+        run: |
+          python -m pip install build
+          python -m build
+          python -m venv "${{ runner.temp }}/release-venv"
+          "${{ runner.temp }}/release-venv/bin/python" -m pip install --no-deps dist/*.whl
+          "${{ runner.temp }}/release-venv/bin/repvblicvs" --state-dir "${{ runner.temp }}/release-state" init
+      - name: clean runtime demonstration
+        env:
+          REPVBLICVS_STATE_DIR: ${{ runner.temp }}/repvblicvs-demo
+        run: |
+          repvblicvs init
+          repvblicvs submit examples/data-repair.json --request-id ci-data-demo
+          repvblicvs run --once
+          repvblicvs status
+          repvblicvs artifacts

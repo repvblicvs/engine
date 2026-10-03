@@ -1,0 +1,6 @@
+{
+  "values": [0, 1, 4, 9, 16, 25, 36, 49, 64, 81],
+  "holdout": 2,
+  "max_degree": 4,
+  "max_order": 3
+}

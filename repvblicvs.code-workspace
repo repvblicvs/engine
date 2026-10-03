@@ -1,0 +1,10 @@
+{
+  "folders": [{"path": "."}],
+  "settings": {
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "files.watcherExclude": {"**/.venv/**": true, "**/build/**": true, "**/dist/**": true},
+    "search.exclude": {"**/.venv/**": true, "**/build/**": true, "**/dist/**": true},
+    "git.autofetch": false,
+    "terminal.integrated.env.osx": {"REPVBLICVS_STATE_DIR": "${env:HOME}/Library/Application Support/Repvblicvs/engine"}
+  }
+}

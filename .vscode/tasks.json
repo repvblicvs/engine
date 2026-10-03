@@ -1,0 +1,10 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label": "Engine: status", "type": "process", "command": "${workspaceFolder}/.venv/bin/repvblicvs", "args": ["status"], "problemMatcher": []},
+    {"label": "Engine: pause", "type": "process", "command": "${workspaceFolder}/.venv/bin/repvblicvs", "args": ["pause"], "problemMatcher": []},
+    {"label": "Engine: resume", "type": "process", "command": "${workspaceFolder}/.venv/bin/repvblicvs", "args": ["resume"], "problemMatcher": []},
+    {"label": "Engine: events", "type": "process", "command": "${workspaceFolder}/.venv/bin/repvblicvs", "args": ["events"], "problemMatcher": []},
+    {"label": "Engine: tests", "type": "process", "command": "${workspaceFolder}/.venv/bin/python", "args": ["-m", "pytest", "-q"], "group": "test", "problemMatcher": []}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "kind": "csv_cleanup",
+  "priority": 100,
+  "payload": {
+    "csv_text": "item,quantity,unit_price\n widget ,2,12.50\nwidget,2,12.50\ngear,3,4.25\n",
+    "remove_duplicates": true
+  }
+}
