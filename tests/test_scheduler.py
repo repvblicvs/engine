@@ -123,7 +123,7 @@ class SchedulerTests(unittest.TestCase):
         controller = WakeController(self.store, 4321)
         with patch("repvblicvs_engine.service.sys.platform", "darwin"), patch("repvblicvs_engine.service.Path.exists", return_value=True), patch("repvblicvs_engine.service.subprocess.Popen", return_value=fake) as popen:
             controller.update()
-            self.assertEqual(popen.call_args.args[0], ["/usr/bin/caffeinate", "-s", "-w", "4321"])
+            self.assertEqual(popen.call_args.args[0], ["/usr/bin/caffeinate", "-i", "-s", "-w", "4321"])
             task = self.store.enqueue({"kind": "test"})
             self.store.claim("worker")
             self.store.stop()

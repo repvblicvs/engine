@@ -1,7 +1,8 @@
 """Reversible per-user launchd supervision with bounded private logs.
 
 The installed agent runs only the canonical package, never task-provided commands.
-macOS caffeinate -s prevents system idle sleep on AC power; display lock remains.
+macOS caffeinate -i prevents idle system sleep on battery and AC; -s also prevents
+system sleep on AC. These assertions do not change display or password locking.
 """
 from __future__ import annotations
 
@@ -110,8 +111,9 @@ class WakeController:
             return
         if wake_required(self.store):
             if self.process is None or self.process.poll() is not None:
-                # -s acts on AC only; -w releases the assertion if the worker dies.
-                self.process = subprocess.Popen(["/usr/bin/caffeinate", "-s", "-w", str(self.worker_pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # -i covers idle sleep on battery; -s covers system sleep on AC.
+                # -w releases both assertions if the supervised worker dies.
+                self.process = subprocess.Popen(["/usr/bin/caffeinate", "-i", "-s", "-w", str(self.worker_pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             self.close()
 
