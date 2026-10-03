@@ -61,7 +61,7 @@ class ConnectorBridge:
             raise ValueError("This bridge accepts confirmed or unknown outcomes; absence requires independent reconciliation")
         if not isinstance(receipt.get("evidence"), str) or not receipt["evidence"].strip():
             raise ValueError("A real connector observation is required")
-        if receipt["status"] == "confirmed" and not receipt.get("external_ref"):
+        if receipt["status"] == "confirmed" and (not isinstance(receipt.get("external_ref"), str) or not receipt["external_ref"].strip()):
             raise ValueError("Confirmed actions require the connector's external identifier")
         with self.store.connection(write=True) as db:
             attempt = db.execute("SELECT * FROM connector_attempts WHERE action_id=? AND token=?", (action_id, token)).fetchone()
@@ -90,6 +90,7 @@ def operate(store: Store, request: dict) -> dict:
         args["available_capabilities"] = set(args.get("available_capabilities", []))
         return commerce.register_opportunity(**args)
     methods = {"solicitation": commerce.register_solicitation, "inquiry": commerce.prepare_inquiry,
+               "application": commerce.prepare_application,
                "contact": commerce.prepare_contact, "quote": commerce.prepare_quote,
                "agreement": commerce.agree_scope, "invoice": commerce.prepare_invoice,
                "event": commerce.record_event, "merchant": commerce.set_merchant_readiness,

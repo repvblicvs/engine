@@ -349,6 +349,31 @@ class Commerce:
             self._save(db, ledger)
             return action
 
+    def prepare_application(self, opportunity_id: str, action_key: str, *, subject: str, proposal: str, review_receipt: str, kind: str = "initial", now: datetime | str | None = None) -> dict:
+        """Prepare a reviewed nonbinding response to a current public request.
+
+        The trusted operator reviews the tailored proposal for truthful service
+        fit and records that review; this does not certify human technical work.
+        Source contents never choose policy, and preparation never sends, quotes,
+        qualifies a job, accepts an assignment, or authorizes payment.
+        """
+        values = (("subject", subject, 200), ("proposal", proposal, 6000), ("review_receipt", review_receipt, 1000))
+        for name, value, limit in values:
+            if not isinstance(value, str) or not value.strip() or len(value) > limit or any((ord(char) < 32 and (name != "proposal" or char not in "\n\t")) or 127 <= ord(char) < 160 for char in value):
+                raise CommercialError("invalid_application", "Application needs bounded reviewed text and a review receipt, without header or control-character injection.")
+        current = _utc(now)
+        with self.store.connection(write=True) as db:
+            ledger = self._ledger(db)
+            entry = self._inquiry(ledger, opportunity_id, current)
+            ledger.reserve_contact(opportunity_id, kind=kind, idempotency_key=action_key, now=current, qualification_only=True)
+            message = ("Repvblicvs is an AI-operated technical delivery business responding to your public solicitation at "
+                       + entry["source_url"] + ".\n\n" + proposal.strip()
+                       + "\n\nThis is a nonbinding application for qualification only. No assignment, delivery commitment, eligibility, price agreement or payment authorization is assumed. Please confirm supplier eligibility and mutually agreed scope before work begins. We do not claim independent human technical review or unverified capabilities.")
+            payload = {"opportunity_id": opportunity_id, "source_url": entry["source_url"], "customer_reference": entry["customer_reference"], "business_identity": "repvblicvs", "subject": subject.strip(), "message": message, "contact_kind": kind, "qualification_only": True, "application_purpose": "nonbinding_solicited_application", "proposal_review_receipt": review_receipt.strip()}
+            action = self._prepare(db, action_key, "commerce_application", payload)
+            self._save(db, ledger)
+            return action
+
     def prepare_quote(self, opportunity_id: str, price_cents: int, action_key: str, *, currency: str = "USD", now: datetime | str | None = None) -> dict:
         _amount(price_cents, currency)
         current = _utc(now)
@@ -430,7 +455,7 @@ class Commerce:
             confirmed = status == "confirmed" and isinstance(external_ref, str) and bool(external_ref)
             absent = reconciliation and status == "not_sent" and isinstance(external_ref, str) and bool(external_ref)
             new_status = "delivered" if confirmed else "prepared" if absent else "unknown"
-            if action["kind"] in {"commerce_contact", "commerce_inquiry"}:
+            if action["kind"] in {"commerce_contact", "commerce_inquiry", "commerce_application"}:
                 if confirmed: ledger.resolve_contact(action["action_key"], "confirmed", receipt=external_ref, now=current)
                 elif absent:
                     item = next(item for item in ledger.state["outreach"] if item["idempotency_key"] == action["action_key"])
@@ -448,15 +473,18 @@ class Commerce:
         current = _utc(now)
         with self.store.connection(write=True) as db:
             action = _action(db.execute("SELECT * FROM outbox WHERE id=?", (action_id,)).fetchone())
-            if action["kind"] not in {"commerce_contact", "commerce_inquiry", "commerce_quote", "commerce_invoice"}: raise CommercialError("unsupported_action", "Only typed commercial intentions can use this transport.")
+            if action["kind"] not in {"commerce_contact", "commerce_inquiry", "commerce_application", "commerce_quote", "commerce_invoice"}: raise CommercialError("unsupported_action", "Only typed commercial intentions can use this transport.")
             if action["status"] != "prepared": return action  # Includes ambiguous/crashed calls.
             ledger = self._ledger(db)
-            if action["kind"] == "commerce_inquiry": self._inquiry(ledger, action["payload"]["opportunity_id"], current)
+            if action["kind"] in {"commerce_inquiry", "commerce_application"}:
+                entry = self._inquiry(ledger, action["payload"]["opportunity_id"], current)
+                if action["kind"] == "commerce_application" and any(entry[field] != action["payload"][field] for field in ("source_url", "customer_reference")):
+                    raise CommercialError("source_target_changed", "Refresh the reviewed application when its verified contact target changes.")
             else: self._qualified(ledger, action["payload"]["opportunity_id"], current, accepted_obligation=action["kind"] == "commerce_invoice")
             if action["kind"] in {"commerce_quote", "commerce_invoice"}: self._merchant(ledger, current)
             if action["kind"] != "commerce_invoice" and any(item["opportunity_id"] == action["payload"]["opportunity_id"] and item["event"] in {"declined", "unsubscribed"} for item in ledger.state["events"]):
                 raise CommercialError("contact_suppressed", "Customer declined or unsubscribed after preparation.")
-            if action["kind"] in {"commerce_contact", "commerce_inquiry"}:
+            if action["kind"] in {"commerce_contact", "commerce_inquiry", "commerce_application"}:
                 item = next(item for item in ledger.state["outreach"] if item["idempotency_key"] == action["action_key"])
                 if item["kind"] == "followup" and any(event["opportunity_id"] == item["opportunity_id"] and event["event"] == "reply" for event in ledger.state["events"]):
                     raise CommercialError("conversation_active", "A new customer reply supersedes the prepared automatic follow-up.")

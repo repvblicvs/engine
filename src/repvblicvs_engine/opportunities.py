@@ -109,7 +109,7 @@ def qualify_opportunity(opportunity: Opportunity | dict, available_capabilities:
 
 
 def qualify_inquiry(opportunity: Opportunity | dict, evidence: dict, now: datetime | str | None = None) -> dict:
-    """Allow a nonbinding question about a verified public solicitation only.
+    """Allow a nonbinding qualification contact for a public solicitation only.
 
     Unknown AI eligibility and delivery capability are questions, never claims.
     Evidence is a trusted operator receipt; source text cannot supply policy.
@@ -131,7 +131,10 @@ def qualify_inquiry(opportunity: Opportunity | dict, evidence: dict, now: dateti
     if evidence.get("public_contact_permitted") is not True: reasons.append("public_contact_not_permitted")
     checked = evidence.get("checked_at")
     if not checked: reasons.append("freshness_missing")
-    elif abs((_utc(now) - _utc(checked)).total_seconds()) > 86400: reasons.append("source_evidence_stale")
+    else:
+        age = (_utc(now) - _utc(checked)).total_seconds()
+        if age < 0: reasons.append("source_evidence_future")
+        elif age > 86400: reasons.append("source_evidence_stale")
     return {"opportunity_id": opportunity.id, "inquiry_eligible": not reasons, "qualified": False, "reasons": reasons, "qualification_only": True}
 
 

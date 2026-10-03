@@ -74,6 +74,45 @@ asks about eligibility, and assumes no assignment, capability, price or payment.
 It never claims the source already permits AI. Once the customer supplies terms,
 register a fully verified opportunity before quoting or accepting a scope.
 
+For an already priced request with a published application channel, the trusted
+operator can instead prepare a tailored response with
+`prepare_application(opportunity_id, action_key, subject=..., proposal=...,
+review_receipt=..., kind="initial", now=...)`. This uses the same solicitation
+and contact-permission gates; it allows unknown supplier eligibility to be
+clarified without claiming it is established. A proposal must be actually reviewed
+by the trusted operator for truthful capability claims and appropriate fit.
+`review_receipt` records that review; it is private metadata, not an assertion of
+independent human technical validation. Subject, proposal and review receipt are
+bounded at 200, 6,000 and 1,000 characters. Control characters and multiline
+subjects are rejected. Source text cannot supply a proposal or change policy.
+
+The message always includes the AI-operated-business disclosure and a nonbinding
+qualification acknowledgement: it assumes no assignment, delivery commitment,
+eligibility, price agreement or payment authorization. `commerce_application`
+has `qualification_only: true`; preparation and confirmed delivery neither
+qualify a job nor create a quote or agreement. Evidence from the future is refused,
+and dispatch rechecks the current source and original verified contact target.
+Register a fully verified opportunity and customer agreement separately before
+accepting paid work. The operator JSON action prepares only an unsent outbox item:
+
+```json
+{
+  "operation": "application",
+  "args": {
+    "opportunity_id": "previously-registered-solicitation-id",
+    "action_key": "solicited-application-unique-key",
+    "subject": "Response to your data cleanup request — Repvblicvs",
+    "proposal": "Your posted scope and budget appear suitable for a discussion. We propose a reproducible cleanup package and audit report. Please confirm AI-operated supplier eligibility and the exact acceptance criteria.",
+    "review_receipt": "actual-trusted-operator-proposal-review-receipt"
+  }
+}
+```
+
+Run through `python -m repvblicvs_engine.operator request.json` using the canonical
+private state. Inspect the prepared text before the existing `begin`/`receipt`
+connector procedure. Keep the review receipt private; only the reviewed subject
+and message belong in the customer communication.
+
 `seed_experiments` starts three offers with advisory price bands: dataset repair
 and automation ($150–600); one reproducible software fix with a regression test
 ($200–900); and a sourced document/report/presentation ($100–500). These bands are
@@ -120,10 +159,11 @@ connector evidence; protocol support alone does not establish a live connection.
 
 Prepared contacts contain tailored deliverables, acceptance, and truthful AI use.
 SQLite reserves at most three initial contacts per Eastern day before callbacks.
-`commerce_inquiry` and `commerce_contact` share that one limit, customer deduplication,
-follow-up policy, outbox and idempotency state. There is no extra inquiry allowance.
-Uncertain inquiries remain counted and cannot be retried without a verified
-not-sent receipt. Inquiries do not count as qualified experiment contacts.
+`commerce_inquiry`, `commerce_application` and `commerce_contact` share that one
+limit, customer deduplication, follow-up policy, outbox and idempotency state.
+There is no extra inquiry or application allowance. Uncertain inquiries and
+applications remain counted and cannot be retried without a verified not-sent
+receipt. Neither counts as a qualified experiment contact.
 Only one automatic follow-up per opportunity is eligible after three business days
 (weekends excluded). Follow-ups are also bounded at three per day. Replies,
 declines, and unsubscribes suppress inappropriate automatic follow-ups.
