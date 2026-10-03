@@ -158,15 +158,31 @@ never guesses credentials. Actual transport readiness requires separately record
 connector evidence; protocol support alone does not establish a live connection.
 
 Prepared contacts contain tailored deliverables, acceptance, and truthful AI use.
-SQLite reserves at most three initial contacts per Eastern day before callbacks.
-`commerce_inquiry`, `commerce_application` and `commerce_contact` share that one
-limit, customer deduplication, follow-up policy, outbox and idempotency state.
-There is no extra inquiry or application allowance. Uncertain inquiries and
-applications remain counted and cannot be retried without a verified not-sent
+The owner can remove the global daily contact restriction through private operator
+policy. `Commerce.set_contact_policy(daily_contact_limit=None,
+max_dispatch_batch=20, authorization_receipt="<owner instruction receipt>")`
+records that explicit authorization and its history in the same SQLite business
+state used by reservation and dispatch. It performs no external action. A null
+limit applies to both initial contacts and eligible follow-ups; it does not impose
+a replacement daily ceiling. Existing stores without this setting retain the
+legacy three-per-day behavior until an authorized operator changes it.
+`commerce_inquiry`, `commerce_application` and `commerce_contact` share customer
+deduplication, source qualification, follow-up policy, outbox and idempotency state.
+Uncertain inquiries and applications cannot be retried without a verified not-sent
 receipt. Neither counts as a qualified experiment contact.
 Only one automatic follow-up per opportunity is eligible after three business days
-(weekends excluded). Follow-ups are also bounded at three per day. Replies,
+(weekends excluded). Replies,
 declines, and unsubscribes suppress inappropriate automatic follow-ups.
+
+`dispatch_batch(action_ids, transport)` accepts an explicit reviewed list of
+distinct contact actions and performs at most the configured finite number per
+invocation (20 by default, configurable from 1–100). An oversized or malformed
+batch is rejected before any connector callback. Further reviewed batches may run
+the same day as capacity and suitable opportunities allow. This invocation bound
+prevents a single runaway loop; it is not a daily contact quota. Every action still
+passes its own current-source and customer gates. Batch dispatch excludes quotes
+and invoices. Three simultaneous offer experiments remain the independent demand
+testing limit, regardless of the number of appropriate customer contacts.
 
 Dispatch commits a `dispatching` state before invoking a connector. Confirmed
 actions require an `external_ref`; replay returns the existing receipt without
@@ -174,8 +190,10 @@ calling again. Timeouts and crash outcomes become `unknown`. `reconcile` only re
 receipts; it never resends. A verified `not_sent` receipt permits a controlled retry.
 An in-flight `dispatching` call receives a two-minute grace period before receipt
 reconciliation, preventing a live send from racing a premature "not found" query.
-Uncertain attempts consume their slots until reconciled. A queued contact crossing
-midnight must claim a slot on its actual send day.
+Uncertain attempts retain their reservations until reconciled. If an operator has
+configured a finite daily limit, uncertain attempts count against it and a queued
+contact crossing midnight must claim a slot on its actual send day. With the daily
+limit removed, neither preparation nor dispatch blocks a fourth suitable contact.
 
 Merchant readiness must verify a live account, charges/payouts/details enabled,
 no currently due requirements, and customer-facing business name, support contact,

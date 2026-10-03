@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Protocol
 
-from .opportunities import CommercialLedger, Opportunity, OpportunityError, _utc, qualify_inquiry, valid_source_url
+from .opportunities import CommercialLedger, Opportunity, OpportunityError, _utc, contact_policy, qualify_inquiry, valid_source_url
 from .store import ConflictError, Store, encode
 
 
@@ -127,6 +127,29 @@ class Commerce:
             ledger = self._ledger(db)
             execution = [dict(row) for row in db.execute("SELECT * FROM commerce_execution ORDER BY created")]
             return {"state": ledger.export_state(), "financial": ledger.financial_summary(), "execution": execution, "transport": "supplied_by_trusted_operator"}
+
+    def set_contact_policy(self, *, daily_contact_limit: int | None, authorization_receipt: str, max_dispatch_batch: int = 20, now: datetime | str | None = None) -> dict:
+        """Record a trusted owner/operator instruction, never source-supplied data.
+
+        Null removes the global daily cap. Customer suppression, solicitation
+        qualification, deduplication and follow-up eligibility remain unchanged.
+        """
+        policy = contact_policy({"daily_contact_limit": daily_contact_limit, "max_dispatch_batch": max_dispatch_batch})
+        if not isinstance(authorization_receipt, str) or not authorization_receipt.strip() or len(authorization_receipt) > 512:
+            raise CommercialError("invalid_contact_policy", "An explicit bounded owner authorization receipt is required.")
+        receipt = authorization_receipt.strip()
+        current = _utc(now)
+        with self.store.connection(write=True) as db:
+            ledger = self._ledger(db)
+            previous = ledger.state.get("contact_policy")
+            if previous is not None and contact_policy(previous) == policy and previous.get("authorization_receipt") == receipt:
+                return dict(previous)
+            result = {**policy, "authorization_receipt": receipt, "updated_at": current.isoformat()}
+            ledger.state["contact_policy"] = result
+            ledger.state.setdefault("contact_policy_history", []).append(dict(result))
+            self._save(db, ledger)
+            Store._event(db, "commercial_contact_policy_changed", **result)
+            return result
 
     def seed_experiments(self, now: datetime | str | None = None) -> list[dict]:
         with self.store.connection(write=True) as db:
@@ -486,12 +509,13 @@ class Commerce:
                 raise CommercialError("contact_suppressed", "Customer declined or unsubscribed after preparation.")
             if action["kind"] in {"commerce_contact", "commerce_inquiry", "commerce_application"}:
                 item = next(item for item in ledger.state["outreach"] if item["idempotency_key"] == action["action_key"])
+                daily_limit = contact_policy(ledger.state.get("contact_policy"))["daily_contact_limit"]
                 if item["kind"] == "followup" and any(event["opportunity_id"] == item["opportunity_id"] and event["event"] == "reply" for event in ledger.state["events"]):
                     raise CommercialError("conversation_active", "A new customer reply supersedes the prepared automatic follow-up.")
                 today = current.astimezone(ledger.timezone).date()
                 if _utc(item["reserved_at"]).astimezone(ledger.timezone).date() != today:
                     count = sum(other["kind"] == item["kind"] and other["state"] != "cancelled" and _utc(other["reserved_at"]).astimezone(ledger.timezone).date() == today for other in ledger.state["outreach"])
-                    if count >= 3: raise CommercialError("daily_contact_cap", "Deferred contact needs an available slot on its actual send day.")
+                    if daily_limit is not None and count >= daily_limit: raise CommercialError("daily_contact_cap", "Deferred contact exceeds the private configured limit on its actual send day.")
                     item["reserved_at"] = current.isoformat()
                 self._save(db, ledger)
             db.execute("UPDATE outbox SET status='dispatching',updated=? WHERE id=?", (time.time(), action_id))
@@ -504,6 +528,24 @@ class Commerce:
         except Exception:
             result = {"status": "unknown"}
         return self._resolved(action_id, result, current)
+
+    def dispatch_batch(self, action_ids: list[str], transport: Transport, *, now: datetime | str | None = None) -> list[dict]:
+        """Dispatch a finite reviewed list, preserving per-action recovery gates.
+
+        This is a per-invocation bound rather than a daily throughput restriction.
+        An oversized, duplicate or invalid batch fails before any callback.
+        """
+        current = _utc(now)
+        with self.store.connection() as db:
+            ledger = self._ledger(db)
+            limit = contact_policy(ledger.state.get("contact_policy"))["max_dispatch_batch"]
+            if not isinstance(action_ids, list) or not 1 <= len(action_ids) <= limit or any(not isinstance(identifier, str) or not identifier or len(identifier) > 128 for identifier in action_ids) or len(set(action_ids)) != len(action_ids):
+                raise CommercialError("invalid_contact_batch", "Supply distinct reviewed contact action identifiers within the private invocation limit.")
+            for identifier in action_ids:
+                action = _action(db.execute("SELECT * FROM outbox WHERE id=?", (identifier,)).fetchone())
+                if action["kind"] not in {"commerce_contact", "commerce_inquiry", "commerce_application"}:
+                    raise CommercialError("invalid_contact_batch", "A contact batch cannot dispatch quotes, invoices or other action kinds.")
+        return [self.dispatch(identifier, transport, now=current) for identifier in action_ids]
 
     def reconcile(self, action_id: str, transport: Transport, *, now: datetime | str | None = None) -> dict:
         with self.store.connection() as db:

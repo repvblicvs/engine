@@ -113,7 +113,9 @@ def preflight(provider: dict, *, now: float | None = None) -> dict:
     if percent is None or not 10 < percent <= 100 or reset is None or reset <= now or isinstance(calls, bool) or not isinstance(calls, int) or not 1 <= calls <= 5:
         raise AdapterError("Native quota reserve or bounded local call envelope is unavailable")
     snapshot = profile_snapshot(sparse=evidence.get("sparse_profile"))
-    if evidence.get("profile_sha256") != snapshot["profile_sha256"]:
+    accepted_hashes = {evidence.get("profile_sha256")}
+    if _verified_sparse(evidence.get("sparse_profile"), now): accepted_hashes.add(evidence["sparse_profile"]["sha256"])
+    if snapshot["profile_sha256"] not in accepted_hashes:
         raise AdapterError("Native settings differ from the reviewed effective profile")
     return snapshot | {"billing_mode": "included", "included_allowance": True, "paid_charge_recorded": 0, "native_usage_receipt": quota["receipt"], "native_usage_observed_at": quota["observed_at"], "native_remaining_percent": percent, "native_reset_at": reset, "profile_receipt": evidence["profile_receipt"], "local_call_envelope": calls, "native_quota_is_call_count": False, "verified_sparse_profile": evidence.get("sparse_profile") if _verified_sparse(evidence.get("sparse_profile"), now) else None}
 

@@ -26,6 +26,22 @@ class OpportunityError(ValueError):
 CATEGORIES = {"software", "data", "web", "research", "documents", "creative"}
 FINANCIAL_EVENTS = {"quoted", "agreed", "paid", "refunded", "fee", "compute_cost", "settled", "funds_available"}
 EVENTS = FINANCIAL_EVENTS | {"qualified", "reply", "delivered", "declined", "unsubscribed"}
+DEFAULT_CONTACT_POLICY = {"daily_contact_limit": 3, "max_dispatch_batch": 20}
+
+
+def contact_policy(value: dict | None = None) -> dict:
+    """Validate private operator policy; solicitation text cannot set this state."""
+    if value is None:
+        return dict(DEFAULT_CONTACT_POLICY)
+    if not isinstance(value, dict):
+        raise OpportunityError("invalid_contact_policy", "Contact policy must be a private configuration object.")
+    daily = value.get("daily_contact_limit", 3)
+    batch = value.get("max_dispatch_batch", 20)
+    if daily is not None and (isinstance(daily, bool) or not isinstance(daily, int) or not 1 <= daily <= 10000):
+        raise OpportunityError("invalid_contact_policy", "Daily limit must be a positive integer or null to remove it.")
+    if isinstance(batch, bool) or not isinstance(batch, int) or not 1 <= batch <= 100:
+        raise OpportunityError("invalid_contact_policy", "Each dispatch invocation must have a finite batch limit of 1–100.")
+    return {"daily_contact_limit": daily, "max_dispatch_batch": batch}
 
 
 def _utc(value: datetime | str | None = None) -> datetime:
@@ -250,8 +266,9 @@ class CommercialLedger:
         if kind == "initial" and customer and any(item["kind"] == "initial" and self.state["opportunities"][item["opportunity_id"]].get("customer_reference") == customer for item in active):
             raise OpportunityError("duplicate_customer_contact", "This customer already has an initial contact; handle their requests in the existing conversation.")
         day = current.astimezone(self.timezone).date()
-        if sum(item["kind"] == kind and _utc(item["reserved_at"]).astimezone(self.timezone).date() == day for item in active) >= 3:
-            raise OpportunityError("daily_contact_cap", "At most three initial contacts and three eligible follow-ups may be reserved per day.")
+        daily_limit = contact_policy(self.state.get("contact_policy"))["daily_contact_limit"]
+        if daily_limit is not None and sum(item["kind"] == kind and _utc(item["reserved_at"]).astimezone(self.timezone).date() == day for item in active) >= daily_limit:
+            raise OpportunityError("daily_contact_cap", "The private configured daily contact limit is exhausted.")
         if kind == "followup":
             initial = next((item for item in active if item["opportunity_id"] == opportunity_id and item["kind"] == "initial" and item["state"] == "confirmed"), None)
             if not initial: raise OpportunityError("followup_without_initial", "A confirmed initial contact is required.")

@@ -173,8 +173,10 @@ def test_exact_native_attested_sparse_rewrite_preserves_completed_artifact(conte
     result = native_result()
     result["agy_preflight"] = before
     assert agy.response(result)[0] == "ARTIFACT_READY"
-    provider["evidence"]["profile_sha256"] = attestation["sha256"]
+    # A subsequent distinct task sees native's sparse file without requiring
+    # another settings write or a fabricated new effective-profile receipt.
     assert agy.preflight(provider, now=now)["profile_basis"] == "exact fresh effective native UI sparse-file receipt"
+    assert provider["evidence"]["profile_sha256"] == before["profile_sha256"]
     profile.write_text(json.dumps({**sparse_settings, "useG1Credits": True}))
     assert agy.failure_kind(result) == "ambiguous"
     with pytest.raises(agy.AdapterError): agy.response(result)
