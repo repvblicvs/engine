@@ -33,6 +33,11 @@ class Router:
             self.store._event(db, "account_verified", account_id=account_id, status=status)
 
     def configure_provider(self, name: str, account_id: str, *, model: str | None = None, evidence: dict | None = None, verified_until: float = 0, status: str = "unavailable", budget: float = 0, included_only: bool = True):
+        """included_only retains the no-new-cash-route gate for non-Fable adapters.
+
+        Owner-authorized Codex existing prepaid credits may pass that same gate;
+        their actual billing_mode and credit quantities live in account_evidence.
+        """
         if name not in ROUTE_ORDER or status not in {"ready", "unavailable", "cooldown"}:
             raise ValueError("Unknown provider or status")
         if budget < 0 or (name == "fable" and budget > 5):
@@ -51,9 +56,11 @@ class Router:
         now = time.time()
         with self.store.connection() as db:
             result = []
-            for row in db.execute("SELECT p.*,a.status account_status,a.verified_until allowance_until,a.remaining_calls,a.available_credit,a.reset_at FROM providers p JOIN accounts a ON p.account_id=a.id"):
+            for row in db.execute("SELECT p.*,a.status account_status,a.evidence account_evidence,a.verified_until allowance_until,a.remaining_calls,a.available_credit,a.reset_at FROM providers p JOIN accounts a ON p.account_id=a.id"):
                 item = dict(row)
                 item["evidence"] = json.loads(item["evidence"])
+                item["account_evidence"] = json.loads(item["account_evidence"])
+                item["billing_mode"] = item["account_evidence"].get("billing_mode", "unverified")
                 item["currently_verified"] = row["status"] == "ready" and row["account_status"] == "verified" and min(row["verified_until"], row["allowance_until"]) > now
                 item["effective_status"] = "ready" if item["currently_verified"] and (row["remaining_calls"] is None or row["remaining_calls"] > 0) else "unavailable"
                 result.append(item)
@@ -64,7 +71,9 @@ class Router:
     def reserve(self, request_id: str, *, ceiling: float = 0, preferred: str | None = None) -> dict:
         """Select a permitted route atomically, accounting for shared account limits.
 
-        A ceiling > 0 is allowed only for Fable. Included routes have ceiling zero.
+        A dollar ceiling > 0 is allowed only for Fable. Other routes have ceiling
+        zero for new cash charges. Codex existing-credit observations are tracked
+        separately in credit units, without an invented monetary conversion.
         Reservations remain charged against the safety envelope until settled or
         explicitly released after evidence that no external call occurred.
         """

@@ -1,7 +1,9 @@
-"""Bounded artifact-only Opus/Sol calls using verified existing OAuth allowance.
+"""Bounded artifact-only calls using verified OAuth allowance or authorized credits.
 
 Responses are untrusted text, never executable instructions. A durable dispatch
 receipt and inherited process locks prevent duplicate calls after ambiguous death.
+Codex prepaid credits are quantities, not dollar/token estimates. The credit
+reserve is observed before/after calls, not an enforceable provider-side spend cap.
 """
 from __future__ import annotations
 
@@ -24,6 +26,10 @@ from .store import encode
 from .workflows import WorkflowError
 
 SUPPORTED = {"opus": "claude-opus-5-5", "sol": "gpt-6.1-sol", "copilot": "auto"}
+
+
+class ProcessNotStarted(OSError):
+    """Only subprocess creation failures prove that no model call was started."""
 
 
 def _atomic_json(path: Path, value: dict):
@@ -80,11 +86,12 @@ def command(provider: str, prompt: str = "", usage_path: Path | None = None) -> 
 
 def _run(argv: list[str], prompt: str, cwd: Path, timeout: float, maximum: int, inherited_fds=()) -> dict:
     """Bound output while draining both pipes; kill the process group on timeout."""
-    process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=safe_environment(), start_new_session=True, pass_fds=tuple(inherited_fds))
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=safe_environment(), start_new_session=True, pass_fds=tuple(inherited_fds))
+    except OSError as exc:
+        raise ProcessNotStarted("Model process could not be created") from exc
     stdout, stderr = bytearray(), bytearray()
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, stdout)
-    selector.register(process.stderr, selectors.EVENT_READ, stderr)
+    selector, writer = None, None
     send_error = []
     def send():
         try:
@@ -94,10 +101,13 @@ def _run(argv: list[str], prompt: str, cwd: Path, timeout: float, maximum: int, 
             send_error.append(type(exc).__name__)
         finally:
             process.stdin.close()
-    writer = threading.Thread(target=send, daemon=True)
-    writer.start()
     deadline, failure = time.monotonic() + timeout, None
     try:
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, stdout)
+        selector.register(process.stderr, selectors.EVENT_READ, stderr)
+        writer = threading.Thread(target=send, daemon=True)
+        writer.start()
         while selector.get_map():
             if time.monotonic() >= deadline:
                 failure = "timeout"
@@ -128,8 +138,12 @@ def _run(argv: list[str], prompt: str, cwd: Path, timeout: float, maximum: int, 
         process.wait()
         raise
     finally:
-        selector.close()
-        writer.join(timeout=2)
+        if selector:
+            selector.close()
+        if writer and writer.ident is not None:
+            writer.join(timeout=2)
+        if not process.stdin.closed:
+            process.stdin.close()
         process.stdout.close()
         process.stderr.close()
 
@@ -176,6 +190,29 @@ def _response(provider: str, result: dict) -> tuple[str, dict]:
     return "\n\n".join(messages), {"provider": provider, "model": SUPPORTED[provider], "included_allowance": True, "paid_charge_recorded": 0, "usage": finished.get("usage", {})}
 
 
+def _sol_billing_evidence(snapshot: dict | None) -> dict:
+    """Describe the verified preflight mode without assigning credit use to tokens."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    decision = snapshot.get("dispatch", {})
+    mode = decision.get("billing_mode", "unavailable")
+    return {"billing_mode": mode, "included_allowance": mode == "included", "paid_charge_recorded": 0, "usd_cash_charge_recorded": 0, "new_cash_spending_authorized": False, "allowance_preflight": decision, "credit_observation_before": snapshot.get("credit_observation"), "credit_accounting": "observed shared-account deltas; not attributed to this call or converted from tokens"}
+
+
+def _sol_postflight(store, router, provider: dict, preflight: dict, evidence: dict) -> dict:
+    """A failed postflight cannot turn a completed durable receipt into a replay."""
+    try:
+        after = refresh_sol(store, router, provider, raise_on_unavailable=False)
+        before_observation = preflight.get("credit_observation") or {}
+        after_observation = after.get("credit_observation") or {}
+        result = evidence | {"allowance_postflight": after.get("dispatch"), "credit_observation_after": after.get("credit_observation")}
+        if before_observation and after_observation:
+            result["observed_shared_account_depletion_since_preflight_credits"] = max(0, after_observation["observed_depletion_credits"] - before_observation["observed_depletion_credits"])
+            result["credit_depletion_attribution"] = "shared_account_unattributed; includes any concurrent account activity"
+        return result
+    except Exception as exc:
+        return evidence | {"postflight_observation_status": "unavailable", "postflight_observation_reason": str(exc)[:300], "credit_depletion_attribution": "unknown; no credit price or model attribution inferred"}
+
+
 def run_model_instruction(store, task: dict, output_dir: Path, *, inherited_fds=()) -> dict:
     payload = task["payload"]
     allowed_keys = {"prompt", "requirements", "prior_evidence", "preferred", "timeout_seconds", "max_output_bytes"}
@@ -191,6 +228,18 @@ def run_model_instruction(store, task: dict, output_dir: Path, *, inherited_fds=
     digest = hashlib.sha256(prompt.encode()).hexdigest()
     router, attempts = Router(store), []
     order = [preferred, *[name for name in ("opus", "sol", "copilot") if name != preferred]]
+    # Recover completed work before considering a newly available route. A quota
+    # reset, billing change or expired entitlement must not duplicate a prior
+    # answer, or hide an ambiguous external request behind another provider.
+    for name in order:
+        base_id = "model:" + task["id"] + ":" + digest + ":" + name
+        retained = store.root / "model_calls" / (hashlib.sha256(base_id.encode()).hexdigest() + ".json")
+        if retained.exists():
+            previous = json.loads(retained.read_text())
+            if previous.get("status") == "completed":
+                return _deliver(output_dir, previous["answer"], previous["evidence"], [{"provider": name, "result": "recovered_completed_receipt"}])
+            if previous.get("status") in {"dispatching", "unknown"}:
+                raise WorkflowError("capability_unavailable", "Prior model call has an ambiguous outcome; receipt reconciliation required before another call")
     for provider_name in order:
         provider = next(item for item in router.list() if item["name"] == provider_name)
         valid_entitlement = provider.get("status") in {"ready", "cooldown"} and provider.get("verified_until", 0) > time.time() and provider.get("retry_after", 0) <= time.time()
@@ -198,6 +247,9 @@ def run_model_instruction(store, task: dict, output_dir: Path, *, inherited_fds=
             attempts.append({"provider": provider_name, "reason": "Unverified entitlement or model identity"})
             continue
         evidence = provider.get("evidence", {})
+        if provider_name == "sol" and evidence.get("auth") != "chatgpt":
+            attempts.append({"provider": provider_name, "reason": "Existing ChatGPT OAuth route is not attested"})
+            continue
         if provider_name == "opus" and not (evidence.get("paid_usage_disabled") is True and evidence.get("auto_reload_disabled") is True and evidence.get("auth") == "oauth"):
             attempts.append({"provider": provider_name, "reason": "Included OAuth route and paid-credit controls are not attested"})
             continue
@@ -230,12 +282,21 @@ def run_model_instruction(store, task: dict, output_dir: Path, *, inherited_fds=
                     if generation >= 3 or previous.get("retry_after", 0) > time.time():
                         attempts.append({"provider": provider_name, "reason": "Bounded retry cooling down or exhausted"})
                         continue
+            preflight = None
+            call_timeout, call_maximum = timeout, maximum
             if provider_name == "sol":
                 try:
-                    refresh_sol(store, router, provider)
+                    preflight = refresh_sol(store, router, provider)
+                    if not isinstance(preflight, dict) or preflight.get("dispatch", {}).get("allowed") is not True or preflight["dispatch"].get("billing_mode") not in {"included", "authorized_existing_credits"}:
+                        raise RuntimeError("Fresh Codex dispatch evidence is unavailable")
                 except Exception as exc:
                     attempts.append({"provider": provider_name, "reason": str(exc)[:300]})
                     continue
+                if isinstance(preflight, dict) and preflight.get("dispatch", {}).get("billing_mode") == "authorized_existing_credits":
+                    if len(prompt) > 20000 or payload.get("timeout_seconds", 90) > 90 or payload.get("max_output_bytes", 65536) > 65536:
+                        raise WorkflowError("capability_unavailable", "Existing-credit request exceeds the 20,000-character packet, 90-second timeout, or 64 KiB output envelope; owner review required, requirements preserved")
+                    call_timeout = payload.get("timeout_seconds", 90)
+                    call_maximum = payload.get("max_output_bytes", 65536)
             if provider.get("status") == "cooldown":
                 with store.connection(write=True) as db:
                     db.execute("UPDATE providers SET status='ready',retry_after=0 WHERE name=?", (provider_name,))
@@ -251,23 +312,34 @@ def run_model_instruction(store, task: dict, output_dir: Path, *, inherited_fds=
                 router.release(call_id, evidence_no_call="Reserved route has no compatible execution adapter")
                 attempts.append({"provider": provider_name, "reason": "Preferred route unavailable; reconsidering verified fallback"})
                 continue
-            _atomic_json(receipt, {"status": "dispatching", "provider": provider_name, "call_id": call_id, "generation": generation, "prompt_digest": digest, "started": time.time()})
+            billing_evidence = _sol_billing_evidence(preflight) if provider_name == "sol" else {}
+            _atomic_json(receipt, {"status": "dispatching", "provider": provider_name, "call_id": call_id, "generation": generation, "prompt_digest": digest, "started": time.time(), **billing_evidence})
             try:
-                result = _run(argv, prompt, output_dir, timeout, maximum, (*inherited_fds, lock_fd))
+                result = _run(argv, prompt, output_dir, call_timeout, call_maximum, (*inherited_fds, lock_fd))
                 if provider_name == "copilot" and usage_path.exists() and usage_path.stat().st_size <= 1_000_000:
                     result["copilot_usage"] = json.loads(usage_path.read_text())
-            except OSError:
+            except ProcessNotStarted:
                 router.release(call_id, evidence_no_call="Process spawn failed before any model request")
                 _atomic_json(receipt, {"status": "failed", "classification": "capability", "provider": provider_name, "call_id": call_id, "generation": generation, "retry_after": time.time() + 60})
                 attempts.append({"provider": provider_name, "reason": "Process spawn failed"})
                 continue
+            except OSError as exc:
+                unknown = {"status": "unknown", "classification": "ambiguous", "provider": provider_name, "call_id": call_id, "generation": generation, "failure": "post_spawn_io_error", "error_type": type(exc).__name__, **billing_evidence}
+                _atomic_json(receipt, unknown)
+                if provider_name == "sol" and isinstance(preflight, dict):
+                    _atomic_json(receipt, unknown | _sol_postflight(store, router, provider, preflight, billing_evidence))
+                raise WorkflowError("capability_unavailable", "Model process I/O failed after possible dispatch; ambiguous receipt retained, reconciliation required") from exc
             try:
                 answer, model_evidence = _response(provider_name, result)
             except (ValueError, KeyError, TypeError):
                 classification = classify_failure(result)
                 retry_after = provider.get("reset_at") if classification == "quota" else None
                 retry_after = retry_after if isinstance(retry_after, (int, float)) and retry_after > time.time() else time.time() + 60
-                _atomic_json(receipt, {"status": "unknown" if classification == "ambiguous" else "failed", "classification": classification, "provider": provider_name, "call_id": call_id, "generation": generation, "retry_after": retry_after, "exit_code": result["exit_code"], "stdout": result["stdout"], "stderr": result["stderr"], "failure": result.get("failure")})
+                failed = {"status": "unknown" if classification == "ambiguous" else "failed", "classification": classification, "provider": provider_name, "call_id": call_id, "generation": generation, "retry_after": retry_after, "exit_code": result["exit_code"], "stdout": result["stdout"], "stderr": result["stderr"], "failure": result.get("failure"), **billing_evidence}
+                _atomic_json(receipt, failed)
+                if provider_name == "sol" and isinstance(preflight, dict):
+                    billing_evidence = _sol_postflight(store, router, provider, preflight, billing_evidence)
+                    _atomic_json(receipt, failed | billing_evidence)
                 if classification == "ambiguous":
                     raise WorkflowError("capability_unavailable", "Model outcome ambiguous; retained receipt prevents duplicate execution")
                 router.settle(call_id, 0)
@@ -275,11 +347,17 @@ def run_model_instruction(store, task: dict, output_dir: Path, *, inherited_fds=
                 attempts.append({"provider": provider_name, "reason": classification})
                 continue
             router.settle(call_id, 0)
-            store.record_cost(provider_name, provider["account_id"], 0, call_id, task_id=task["id"], included=True)
-            _atomic_json(receipt, {"status": "completed", "provider": provider_name, "call_id": call_id, "answer": answer, "evidence": model_evidence, "completed": time.time()})
+            if provider_name == "sol":
+                model_evidence |= billing_evidence
+            store.record_cost(provider_name, provider["account_id"], 0, call_id, task_id=task["id"], included=model_evidence["included_allowance"])
+            completed = {"status": "completed", "provider": provider_name, "call_id": call_id, "answer": answer, "evidence": model_evidence, "completed": time.time()}
+            _atomic_json(receipt, completed)
+            if provider_name == "sol" and isinstance(preflight, dict):
+                model_evidence = _sol_postflight(store, router, provider, preflight, model_evidence)
+                _atomic_json(receipt, completed | {"evidence": model_evidence})
             attempts.append({"provider": provider_name, "result": "completed"})
             return _deliver(output_dir, answer, model_evidence, attempts)
-    raise WorkflowError("capability_unavailable", "No verified included route available: " + encode(attempts))
+    raise WorkflowError("capability_unavailable", "No verified authorized route available: " + encode(attempts))
 
 
 def _deliver(output_dir: Path, answer: str, evidence: dict, attempts: list) -> dict:

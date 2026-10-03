@@ -1,11 +1,12 @@
 {
   "upstream": "https://github.com/repvblicvs/repvblicvs",
-  "revision": "c6455f45387db12c8f91e749ae6975d294bb2662",
+  "revision": "f199329fcb10233aeace3c262bb1a8c949ccf589",
   "license": "MIT",
   "files": {
     "catalog_csv.py": "3c5998f40937fb9b7b5af8cd6776ed142ab5b951318b04c6c2209082004861fa",
     "json_preflight.py": "0885ce7f3401ac679011e29675d9f15605c6eb193c4fbb03be472462d1847916"
   },
   "modifications": "none",
-  "validation": "Original 31 Python regression tests passed on the preserved current source; browser CSV and UI tests also passed."
+  "validation": "Unmodified source hashes match the current reviewed public profile snapshot; its 31 Python regression tests and browser CSV/UI checks passed.",
+  "preserved_original_revision": "c6455f45387db12c8f91e749ae6975d294bb2662"
 }
