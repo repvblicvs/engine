@@ -14,6 +14,19 @@ repvblicvs pause
 
 No frontend is a compulsory intermediary. A task's responsible operator may use its existing authorized connector and record the result in the shared store. Review of delegated output and responsibility for final validation remain explicit.
 
+The deterministic worker assigns a fresh lease owner to each claim. Direct
+`Store` clients must also use a unique owner for each claim and keep that owner
+with its heartbeat, checkpoints and final transitions. Reusing an owner across
+attempts prevents the owner-string API from distinguishing stale callbacks.
+A durable `workflow_finished` checkpoint can be finalized after the last allowed
+execution attempt without running the workflow again or consuming another retry.
+An expired worker's failure or deferral cannot overwrite a replacement claim.
+
+MCP artifact reads walk each path component through open directory descriptors.
+Symlinks, traversal paths and nonregular files are refused; replacing an ancestor
+with a symlink does not redirect the read outside artifact storage. The 1 MB
+content bound applies before and during reading.
+
 ## External actions
 
 `repvblicvs-operator REQUEST.json` prepares operations in private state. Keep request files outside the repository.
@@ -35,5 +48,12 @@ Select a suitable route for the work's complexity and tools. Preserve requiremen
 ## Lifecycle
 
 Use an installed virtual environment for service operation. The macOS LaunchAgent supervises the deterministic worker. Managed wake assertions do not prevent every sleep or power event, and an unlocked desktop is necessary for UI actions.
+
+Service replacement verifies that the previous job unloaded before replacing its
+installed configuration. A failed unload or state inspection leaves that
+configuration available for inspection and retry. Installation reports success
+only for a loaded job, and uninstall preserves the configuration if the job
+cannot be unloaded. These checks do not establish physical reboot or sleep/wake
+recovery.
 
 Before closing a client, save its work, record outstanding obligations and release leases. Completed research or source-collection work does not establish customer delivery. Use compact status checks and close completed task tabs to limit resource use.

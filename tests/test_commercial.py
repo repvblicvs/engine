@@ -7,7 +7,7 @@ import pytest
 
 from repvblicvs_engine.commercial import Commerce, CommercialError
 from repvblicvs_engine.opportunities import OpportunityError
-from repvblicvs_engine.store import Store
+from repvblicvs_engine.store import Store, encode
 
 
 NOW = datetime(2026, 10, 2, 16, tzinfo=timezone.utc)
@@ -301,3 +301,158 @@ def test_exploratory_capacity_is_ten_percent_and_customer_work_wins(tmp_path):
     commerce.store.enqueue({"kind": "csv_cleanup", "payload": {}, "priority": 100}, "customer-obligation")
     with pytest.raises(CommercialError) as error: commerce.reserve_execution("later-research", "exploratory_research", 1)
     assert error.value.code == "customer_work_pending"
+
+
+def test_future_source_evidence_does_not_qualify_a_current_route(tmp_path):
+    commerce = Commerce(Store(tmp_path / "state"))
+    result = commerce.register_opportunity(source(), SCOPE, evidence(checked_at=(NOW + timedelta(seconds=1)).isoformat()), {"csv_cleanup"}, now=NOW)
+    assert not result["qualified"]
+    assert "source_evidence_future" in result["reasons"]
+    with pytest.raises(CommercialError):
+        commerce.prepare_contact(result["opportunity_id"], "future-source", now=NOW)
+    assert not commerce.store.list_actions()
+
+
+def test_legacy_future_source_receipt_cannot_dispatch_a_prepared_contact(tmp_path):
+    commerce, identifier = ready(tmp_path)
+    action = commerce.prepare_contact(identifier, "contact", now=NOW)
+    with commerce.store.connection(write=True) as db:
+        ledger = commerce._ledger(db)
+        ledger.state["opportunities"][identifier]["evidence"]["checked_at"] = (NOW + timedelta(seconds=1)).isoformat()
+        commerce._save(db, ledger)
+    transport = FakeTransport()
+    with pytest.raises(CommercialError) as error:
+        commerce.dispatch(action["id"], transport, now=NOW)
+    assert error.value.code == "source_evidence_future"
+    assert not transport.calls
+    assert commerce.store.list_actions()[0]["status"] == "prepared"
+
+
+@pytest.mark.parametrize("age,allowed", [(-1, False), (0, True), (86400, True), (86401, False)])
+def test_merchant_quote_freshness_requires_present_or_past_evidence(tmp_path, age, allowed):
+    commerce, identifier = ready(tmp_path)
+    commerce.record_event(identifier, "reply", idempotency_key="inbound", receipt="synthetic-inbound", now=NOW)
+    commerce.set_merchant_readiness(MERCHANT, "synthetic-freshness-check", checked_at=NOW - timedelta(seconds=age))
+    if allowed:
+        assert commerce.prepare_quote(identifier, 20000, "quote", now=NOW)["status"] == "prepared"
+    else:
+        with pytest.raises(CommercialError) as error:
+            commerce.prepare_quote(identifier, 20000, "quote", now=NOW)
+        assert error.value.code == "merchant_unavailable"
+        assert not commerce.store.list_actions()
+
+
+def test_future_merchant_receipt_blocks_an_accepted_invoice(tmp_path):
+    commerce, identifier = ready(tmp_path)
+    establish_agreement(commerce, identifier, FakeTransport())
+    commerce.set_merchant_readiness(MERCHANT, "synthetic-future-account", checked_at=NOW + timedelta(seconds=1))
+    with pytest.raises(CommercialError) as error:
+        commerce.prepare_invoice(identifier, "invoice", now=NOW)
+    assert error.value.code == "merchant_unavailable"
+    assert all(action["kind"] != "commerce_invoice" for action in commerce.store.list_actions())
+
+
+def test_quote_recipient_refresh_before_dispatch_requires_review(tmp_path):
+    commerce, identifier = ready(tmp_path)
+    commerce.record_event(identifier, "reply", idempotency_key="inbound", receipt="synthetic-inbound", now=NOW)
+    quote = commerce.prepare_quote(identifier, 20000, "quote", now=NOW)
+    commerce.register_opportunity({**source(), "customer_reference": "changed-synthetic-customer"}, SCOPE, evidence(), {"csv_cleanup"}, now=NOW)
+    transport = FakeTransport()
+    with pytest.raises(CommercialError) as error:
+        commerce.dispatch(quote["id"], transport, now=NOW)
+    assert error.value.code == "source_target_changed"
+    assert not transport.calls
+    assert commerce.store.list_actions()[0]["status"] == "prepared"
+
+
+@pytest.mark.parametrize("refresh_before_agreement", [True, False])
+def test_agreement_and_invoice_retain_delivered_quote_customer(tmp_path, refresh_before_agreement):
+    commerce, identifier = ready(tmp_path)
+    transport = FakeTransport()
+    commerce.record_event(identifier, "reply", idempotency_key="inbound", receipt="synthetic-inbound", now=NOW)
+    quote = commerce.prepare_quote(identifier, 20000, "quote", now=NOW)
+    commerce.dispatch(quote["id"], transport, now=NOW)
+    changed = {**source(), "customer_reference": "changed-synthetic-customer"}
+    if refresh_before_agreement:
+        commerce.register_opportunity(changed, SCOPE, evidence(), {"csv_cleanup"}, now=NOW)
+    agreement = commerce.agree_scope(identifier, quote["id"], "synthetic-accepted-terms", now=NOW)
+    if not refresh_before_agreement:
+        commerce.register_opportunity(changed, SCOPE, evidence(), {"csv_cleanup"}, now=NOW)
+    assert agreement["customer_reference"] == source()["customer_reference"]
+    assert commerce.agree_scope(identifier, quote["id"], "synthetic-accepted-terms", now=NOW + timedelta(hours=1)) == agreement
+    invoice = commerce.prepare_invoice(identifier, "invoice", now=NOW)
+    assert invoice["payload"]["customer_reference"] == source()["customer_reference"]
+    assert invoice["payload"]["scope_hash"] == agreement["scope_hash"]
+    assert invoice["payload"]["price_cents"] == agreement["price_cents"]
+    commerce.register_opportunity({**source(), "customer_reference": "another-synthetic-customer"}, SCOPE, evidence(currently_open=False), {"csv_cleanup"}, now=NOW)
+    assert commerce.dispatch(invoice["id"], transport, now=NOW)["status"] == "delivered"
+    assert transport.invoice_calls[0][0]["customer_reference"] == source()["customer_reference"]
+    assert commerce.snapshot()["state"]["agreements"][identifier] == agreement
+    assert commerce.prepare_invoice(identifier, "invoice", now=NOW)["id"] == invoice["id"]
+
+
+def test_new_quote_cannot_retarget_an_existing_agreement(tmp_path):
+    commerce, identifier = ready(tmp_path)
+    establish_agreement(commerce, identifier, FakeTransport())
+    commerce.register_opportunity({**source(), "customer_reference": "changed-synthetic-customer"}, SCOPE, evidence(), {"csv_cleanup"}, now=NOW)
+    with pytest.raises(CommercialError) as error:
+        commerce.prepare_quote(identifier, 20000, "new-quote", now=NOW)
+    assert error.value.code == "source_target_changed"
+    assert len(commerce.store.list_actions()) == 1
+
+
+def test_invoice_dispatch_refuses_a_recipient_different_from_agreement(tmp_path):
+    commerce, identifier = ready(tmp_path)
+    transport = FakeTransport()
+    establish_agreement(commerce, identifier, transport)
+    invoice = commerce.prepare_invoice(identifier, "invoice", now=NOW)
+    payload = {**invoice["payload"], "customer_reference": "changed-synthetic-customer"}
+    with commerce.store.connection(write=True) as db:
+        db.execute("UPDATE outbox SET payload=? WHERE id=?", (encode(payload), invoice["id"]))
+    with pytest.raises(CommercialError) as error:
+        commerce.dispatch(invoice["id"], transport, now=NOW)
+    assert error.value.code == "agreement_target_changed"
+    assert not transport.invoice_calls
+
+
+def test_legacy_agreement_recovers_only_its_delivered_quote_customer(tmp_path):
+    commerce, identifier = ready(tmp_path)
+    quote = establish_agreement(commerce, identifier, FakeTransport())
+    with commerce.store.connection(write=True) as db:
+        ledger = commerce._ledger(db)
+        ledger.state["agreements"][identifier].pop("customer_reference")
+        commerce._save(db, ledger)
+    commerce.register_opportunity({**source(), "customer_reference": "changed-synthetic-customer"}, SCOPE, evidence(), {"csv_cleanup"}, now=NOW)
+    restored = Commerce(Store(tmp_path / "state"))
+    invoice = restored.prepare_invoice(identifier, "invoice", now=NOW)
+    assert invoice["payload"]["customer_reference"] == quote["payload"]["customer_reference"]
+    agreement = restored.snapshot()["state"]["agreements"][identifier]
+    assert agreement["customer_reference"] == quote["payload"]["customer_reference"]
+    assert agreement["quote_action_id"] == quote["id"]
+    assert agreement["price_cents"] == 20000
+
+
+@pytest.mark.parametrize("missing_evidence", ["missing_quote", "missing_receipt", "changed_terms"])
+def test_legacy_agreement_without_verified_original_target_preserves_obligation_and_blocks_billing(tmp_path, missing_evidence):
+    commerce, identifier = ready(tmp_path)
+    quote = establish_agreement(commerce, identifier, FakeTransport())
+    invoice = commerce.prepare_invoice(identifier, "invoice", now=NOW)
+    with commerce.store.connection(write=True) as db:
+        ledger = commerce._ledger(db)
+        agreement = ledger.state["agreements"][identifier]
+        agreement.pop("customer_reference")
+        commerce._save(db, ledger)
+        if missing_evidence == "missing_quote":
+            db.execute("DELETE FROM outbox WHERE id=?", (quote["id"],))
+        elif missing_evidence == "missing_receipt":
+            db.execute("UPDATE outbox SET external_ref=NULL WHERE id=?", (quote["id"],))
+        else:
+            db.execute("UPDATE outbox SET payload=? WHERE id=?", (encode({**quote["payload"], "price_cents": 30000}), quote["id"]))
+    transport = FakeTransport()
+    for operation in (lambda: commerce.prepare_invoice(identifier, "invoice", now=NOW), lambda: commerce.dispatch(invoice["id"], transport, now=NOW)):
+        with pytest.raises(CommercialError) as error:
+            operation()
+        assert error.value.code == "agreement_target_unverified"
+    assert not transport.invoice_calls
+    assert commerce.snapshot()["state"]["agreements"][identifier] == agreement
+    assert commerce.snapshot()["financial"]["counts"]["agreed"] == 1

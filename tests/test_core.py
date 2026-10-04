@@ -124,6 +124,104 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["result"], {"delivered": True})
 
+    def test_finished_checkpoint_survives_final_execution_attempt(self):
+        for maximum in (1, 2):
+            with self.subTest(max_attempts=maximum):
+                task = self.enqueue(max_attempts=maximum)
+                for attempt in range(maximum):
+                    self.store.claim("crashed")
+                    if attempt + 1 < maximum:
+                        self.store.fail(task["id"], "crashed", "Synthetic transient failure")
+                        with self.store.connection(write=True) as db:
+                            db.execute("UPDATE tasks SET next_run=0 WHERE id=?", (task["id"],))
+                saved_result = {"delivered": True, "execution_attempt": maximum}
+                self.store.checkpoint(task["id"], "crashed", {"phase": "workflow_finished", "result": saved_result})
+                self.expire(task["id"])
+                self.store.recover()
+                pending = self.store.get_task(task["id"])
+                self.assertEqual(pending["status"], "queued")
+                self.assertEqual(pending["retry_count"], maximum - 1)
+                with patch("repvblicvs_engine.workflows.run_workflow") as workflow:
+                    result = Worker(self.store).step()
+                workflow.assert_not_called()
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(result["result"], saved_result)
+                self.assertEqual(result["retry_count"], maximum - 1)
+                with self.store.connection() as db:
+                    outcomes = [row[0] for row in db.execute("SELECT outcome FROM attempts WHERE task_id=? ORDER BY number", (task["id"],))]
+                self.assertEqual(outcomes[-2:], ["lease_expired", "completed"])
+
+    def test_incomplete_finished_checkpoint_does_not_bypass_retry_ceiling(self):
+        task = self.enqueue(max_attempts=1)
+        self.store.claim("crashed")
+        self.store.checkpoint(task["id"], "crashed", {"phase": "workflow_finished"})
+        self.expire(task["id"])
+        self.store.recover()
+        self.assertEqual(self.store.get_task(task["id"])["status"], "failed")
+
+    def test_worker_reclaims_use_distinct_owners_and_reject_stale_mutations(self):
+        task = self.enqueue()
+        worker = Worker(self.store)
+        owners = []
+
+        def workflow(*_):
+            owners.append(self.store.get_task(task["id"])["lease_owner"])
+            if len(owners) == 1:
+                self.expire(task["id"])
+                raise LeaseError("Synthetic lease loss")
+            stale = owners[0]
+            mutations = (
+                lambda: self.store.renew(task["id"], stale),
+                lambda: self.store.checkpoint(task["id"], stale, {"stale": True}),
+                lambda: self.store.complete(task["id"], stale, {"stale": True}),
+                lambda: self.store.fail(task["id"], stale, "Stale failure"),
+                lambda: self.store.defer(task["id"], stale, "Stale capability gap"),
+            )
+            for mutation in mutations:
+                with self.assertRaises(LeaseError):
+                    mutation()
+            return {"synthetic": True}
+
+        with patch("repvblicvs_engine.workflows.run_workflow", side_effect=workflow):
+            self.assertEqual(worker.step()["status"], "running")
+            result = worker.step()
+        self.assertNotEqual(owners[0], owners[1])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["attempts"], 2)
+        self.assertTrue(result["result"]["synthetic"])
+
+    def test_run_survives_lease_loss_during_failure_and_defer(self):
+        class UnsupportedError(Exception):
+            code = "capability_unavailable"
+
+        for failure in (RuntimeError, UnsupportedError):
+            with self.subTest(failure=failure.__name__), tempfile.TemporaryDirectory() as directory:
+                store = Store(directory)
+                first = store.enqueue({"kind": "test", "priority": 1})
+                second = store.enqueue({"kind": "test"})
+                calls = []
+
+                def workflow(*_):
+                    calls.append(True)
+                    if len(calls) == 1:
+                        with store.connection(write=True) as db:
+                            db.execute("UPDATE tasks SET lease_expires=0 WHERE id=?", (first["id"],))
+                        replacement = store.claim("replacement-worker")
+                        self.assertEqual(replacement["id"], first["id"])
+                        store.checkpoint(first["id"], "replacement-worker", {"replacement": True})
+                        raise failure("Synthetic workflow error after lease loss")
+                    return {"synthetic": True}
+
+                with patch("repvblicvs_engine.workflows.run_workflow", side_effect=workflow), patch("repvblicvs_engine.scheduler.tick"):
+                    self.assertEqual(Worker(store).run(max_tasks=2), 2)
+                current = store.get_task(first["id"])
+                self.assertEqual(current["status"], "running")
+                self.assertEqual(current["lease_owner"], "replacement-worker")
+                self.assertEqual(current["attempts"], 2)
+                self.assertEqual(current["retry_count"], 1)
+                self.assertEqual(current["checkpoint"], {"replacement": True})
+                self.assertEqual(store.get_task(second["id"])["status"], "completed")
+
     def test_real_csv_workflow_from_queue_and_partial_attempt_preserved(self):
         task = self.store.enqueue({"kind": "csv_cleanup", "payload": {"csv_text": "Item, Value\na, 2\nb, 3\n"}})
         self.store.claim("crashed")
