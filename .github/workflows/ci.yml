@@ -17,11 +17,14 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install '.[test]'
+      - name: check public source
+        run: python -m repvblicvs_engine.publication --tracked
       - run: python -m pytest -q
       - name: build and install released package in a clean environment
         run: |
           python -m pip install build
           python -m build
+          python -m repvblicvs_engine.publication dist/*.whl dist/*.tar.gz
           python -m venv "${{ runner.temp }}/release-venv"
           "${{ runner.temp }}/release-venv/bin/python" -m pip install --no-deps dist/*.whl
           "${{ runner.temp }}/release-venv/bin/repvblicvs" --state-dir "${{ runner.temp }}/release-state" init

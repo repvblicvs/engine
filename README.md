@@ -52,6 +52,8 @@ Model routes require current entitlement and allowance evidence. External commun
 ```sh
 .venv/bin/python -m pip install '.[test]'
 .venv/bin/python -m pytest -q
+.venv/bin/python -m repvblicvs_engine.publication --tracked
+git config core.hooksPath .githooks
 ```
 
-See [operator controls](docs/operator.md), [validation](docs/release-evidence.md), [selected research capabilities](docs/portfolio-components.md).
+See [operator controls](docs/operator.md), [validation](docs/release-evidence.md), [selected research capabilities](docs/portfolio-components.md) and [security boundaries](SECURITY.md).

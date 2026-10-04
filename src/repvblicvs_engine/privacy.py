@@ -11,6 +11,8 @@ from typing import Iterable
 
 
 PATTERNS = {
+    "internal_session_report": re.compile(r"(?im)^\s{0,3}#\s*(?:session[- ]retro" + r"spective|team[- ]direction|executive[- ]handoff|internal[- ]coordination)\b"),
+    "internal_operating_details": re.compile(r"(?i)(?:the own" + r"er (?:also |subsequently )?authorized existing prepaid|initial executive Fable work has a \$|real initial executive hand" + r"off cost was|root conversion oblig" + r"ations|codex-existing-credit-authoriz" + r"ation[.]json)"),
     "private_key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
     "credential": re.compile(r"(?<![\w-])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{30,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{20,})(?![\w-])"),
     "assigned_secret": re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\b\s*[:=]\s*['\"]([A-Za-z0-9_+./=-]{12,})['\"]"),

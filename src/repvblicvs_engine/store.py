@@ -234,7 +234,7 @@ class Store:
         with self.connection(write=True) as db:
             self._recover(db, time.time())
 
-    def claim(self, owner: str, lease_seconds: float = 60) -> dict | None:
+    def claim(self, owner: str, lease_seconds: float = 60, *, exclude_kinds: tuple[str, ...] = ()) -> dict | None:
         if not owner or not 0 < lease_seconds <= 3600:
             raise ValueError("Owner and a lease between zero and 3600 seconds required")
         now = time.time()
@@ -245,6 +245,8 @@ class Store:
             if db.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0] >= 2:
                 return None
             for row in db.execute("SELECT * FROM tasks WHERE status='queued' AND next_run<=? ORDER BY priority DESC,created,id", (now,)).fetchall():
+                if row["kind"] in exclude_kinds:
+                    continue
                 dependencies = json.loads(row["dependencies"])
                 statuses = [db.execute("SELECT status FROM tasks WHERE id=?", (dep,)).fetchone()[0] for dep in dependencies]
                 if any(status in {"failed", "blocked"} for status in statuses):

@@ -12,6 +12,7 @@ import stat
 import sys
 from .providers import Router
 from .store import Store
+from . import __version__
 
 
 def schema(properties=None, required=None):
@@ -111,7 +112,7 @@ class Server:
         if method == "initialize":
             requested = params.get("protocolVersion")
             supported = {"2024-11-05", "2025-03-26", "2025-06-18"}
-            result = {"protocolVersion": requested if requested in supported else "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "repvblicvs-engine", "version": "0.1.0"}, "instructions": "All clients share one persistent queue. External actions require verified adapters; no model route is ready without current evidence."}
+            result = {"protocolVersion": requested if requested in supported else "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "repvblicvs-engine", "version": __version__}, "instructions": "All clients share one persistent queue. External actions require verified adapters; no model route is ready without current evidence."}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

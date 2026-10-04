@@ -1,0 +1,6 @@
+.private export-ignore
+.claude export-ignore
+.codex export-ignore
+.runtime export-ignore
+.env export-ignore
+.githooks export-ignore

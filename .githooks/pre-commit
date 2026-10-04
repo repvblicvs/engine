@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+task_python="${REPVBLICVS_CHECK_PYTHON:-.venv/bin/python}"
+PYTHONPATH=src "$task_python" -m repvblicvs_engine.publication --staged

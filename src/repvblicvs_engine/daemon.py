@@ -112,7 +112,9 @@ class Worker:
             os.close(slot)
 
     def _step_locked(self, slot_fd) -> dict | None:
-        task = self.store.claim(self.owner, self.lease_seconds)
+        # Trusted frontends own connector obligations; deterministic workers
+        # must not consume their attempts or mislabel them unsupported.
+        task = self.store.claim(self.owner, self.lease_seconds, exclude_kinds=("operator_review",))
         if task is None:
             return None
         task_id = task["id"]

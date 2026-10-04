@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+task_python="${REPVBLICVS_CHECK_PYTHON:-.venv/bin/python}"
+while read -r local_ref local_oid remote_ref remote_oid; do
+    case "$local_oid" in 0000000000000000000000000000000000000000) continue ;; esac
+    for revision in $(git rev-list "$local_oid"); do
+        PYTHONPATH=src "$task_python" -m repvblicvs_engine.publication --revision "$revision"
+    done
+done
