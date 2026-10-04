@@ -31,6 +31,17 @@ Failures raise `WorkflowError` with a stable `code` and `message`.
   to three. Results classify supported-within-bounds, ambiguous, and unsupported
   cases. The package includes an exact-rational experiment and replay script;
   finite agreement is not a generating-rule proof or novelty claim.
+- `json_preflight`: provide `text` or its compatibility alias `csv_text`, exactly
+  one at a time. The package preserves the original UTF-8 bytes and reports
+  bounded structural JSON findings, including duplicate keys.
+- `catalog_inspect`: provide exactly one of `text` or `csv_text`. Optional `mode`
+  is `create` or `update`; `header_style` is `current` or `legacy`. The original
+  bytes and bounded catalog findings are packaged without altering the input.
+
+Inspection completion records package production; the report separately states
+whether the source passed structural checks. Unsupported options and acceptance
+criteria are refused before creating an output directory through either
+`run_workflow` or the direct `run_inspection` entry point.
 
 Synthetic fixtures in `examples/` demonstrate data and document deliveries.
 Customer artifacts remain private unless the customer explicitly permits release.
@@ -46,6 +57,8 @@ The operator supplies verified `source_read_receipt`, `scope_receipt`,
 `ai_permission_receipt`, `currently_open: true`, and timezone-aware `checked_at`.
 Evidence expires after 24 hours for new customer acquisition. Intake text is inert
 data and cannot override business policy, choose a shell command, or change tools.
+Future-dated source or merchant evidence is unavailable until its timestamp is
+current; a timestamp within the next 24 hours is not fresh evidence.
 Scope lists deliverables and measurable acceptance, estimated minutes, and optional
 exclusions. Existing scope cannot silently overwrite a customer's agreement.
 
@@ -195,6 +208,13 @@ evaluated offer, every due review, the old offer/price snapshot, revision eviden
 and replacement links, and emits a `commercial_experiment_revised` event.
 
 ## Connector transport, outreach, and payment gates
+
+A prepared quote is bound to its reviewed customer recipient. Dispatch refuses
+an opportunity refresh that changes that recipient. Scope agreement records the
+recipient from the delivered quote, and invoices use that accepted recipient even
+if the listing later changes or closes. Existing agreements without a stored
+recipient require matching delivered-quote evidence before billing can proceed;
+an unresolved recipient does not delete the customer obligation.
 
 The trusted operator supplies a `Transport` with `send`, `invoice`, `receipt`,
 `search`, and `read` callbacks using existing authorized connectors. The package

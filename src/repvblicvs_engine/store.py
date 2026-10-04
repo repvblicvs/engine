@@ -225,10 +225,14 @@ class Store:
                     db.execute("UPDATE operator_receipts SET status='expired',updated=? WHERE task_id=? AND status='claimed'", (now, row["id"]))
                 self._event(db, "operator_lease_expired", row["id"])
                 continue
-            status = "queued" if row["retry_count"] + 1 < row["max_attempts"] else "failed"
-            db.execute("UPDATE tasks SET status=?,retry_count=retry_count+1,lease_owner=NULL,lease_expires=NULL,updated=?,next_run=?,error=? WHERE id=?", (status, now, now, "Worker lease expired", row["id"]))
+            checkpoint = json.loads(row["checkpoint"]) if row["checkpoint"] is not None else None
+            finished = isinstance(checkpoint, dict) and checkpoint.get("phase") == "workflow_finished" and "result" in checkpoint
+            # Finalizing a durable result does not execute the workflow again or
+            # consume a retry, including after the last permitted execution.
+            status = "queued" if finished or row["retry_count"] + 1 < row["max_attempts"] else "failed"
+            db.execute("UPDATE tasks SET status=?,retry_count=retry_count+?,lease_owner=NULL,lease_expires=NULL,updated=?,next_run=?,error=? WHERE id=?", (status, 0 if finished else 1, now, now, "Worker lease expired", row["id"]))
             db.execute("UPDATE attempts SET ended=?,outcome='lease_expired' WHERE task_id=? AND number=?", (now, row["id"], row["attempts"]))
-            self._event(db, "lease_recovered", row["id"], status=status, checkpoint_retained=row["checkpoint"] is not None)
+            self._event(db, "lease_recovered", row["id"], status=status, checkpoint_retained=row["checkpoint"] is not None, completion_pending=finished)
 
     def recover(self) -> None:
         with self.connection(write=True) as db:

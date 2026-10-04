@@ -252,7 +252,10 @@ class Commerce:
         if evidence.get("currently_open") is not True: reasons.append("request_not_verified_open")
         checked = evidence.get("checked_at")
         if not checked: reasons.append("freshness_missing")
-        elif abs((current - _utc(checked)).total_seconds()) > 86400: reasons.append("source_evidence_stale")
+        else:
+            age = (current - _utc(checked)).total_seconds()
+            if age < 0: reasons.append("source_evidence_future")
+            elif age > 86400: reasons.append("source_evidence_stale")
         route = assess_route(evidence, current)
         if not route["execution_ready"]: reasons.extend(route["reasons"])
         with self.store.connection(write=True) as db:
@@ -322,7 +325,7 @@ class Commerce:
     @staticmethod
     def _merchant(ledger: CommercialLedger, current: datetime) -> dict:
         merchant = ledger.state.get("merchant", {})
-        if not merchant.get("ready") or abs((current - _utc(merchant["checked_at"])).total_seconds()) > 86400:
+        if not merchant.get("ready") or not 0 <= (current - _utc(merchant["checked_at"])).total_seconds() <= 86400:
             raise CommercialError("merchant_unavailable", "Live merchant and customer-facing identifiers need current verified readiness.")
         return merchant
 
@@ -333,7 +336,10 @@ class Commerce:
             return entry  # A closed listing does not erase an accepted obligation.
         if not entry or not entry["assessment"]["qualified"]:
             raise CommercialError("unqualified_opportunity", "Action needs a qualified verified solicitation.")
-        if abs((current - _utc(entry["evidence"]["checked_at"])).total_seconds()) > 86400:
+        age = (current - _utc(entry["evidence"]["checked_at"])).total_seconds()
+        if age < 0:
+            raise CommercialError("source_evidence_future", "A future source receipt cannot justify a present commercial action.")
+        if age > 86400:
             raise CommercialError("source_evidence_stale", "Refresh the solicitation before preparing or sending a new action.")
         if not assess_route(entry, current)["execution_ready"]:
             raise CommercialError("route_not_ready", "Verify participation costs, submission process and required enrollment before a new commercial action.")
@@ -360,6 +366,37 @@ class Commerce:
         db.execute("INSERT INTO outbox VALUES(?,?,NULL,?,?,'prepared',NULL,?,?)", (identifier, key, kind, encode(payload), now, now))
         Store._event(db, "commercial_action_prepared", action_id=identifier, kind=kind)
         return _action(db.execute("SELECT * FROM outbox WHERE id=?", (identifier,)).fetchone())
+
+    @staticmethod
+    def _agreement_customer(db, agreement: dict, opportunity_id: str) -> str:
+        """Keep accepted billing identity independent of listing refreshes.
+
+        Older records may recover this identity only from their original
+        delivered quote and receipt, never from the mutable opportunity.
+        Callers persist an inferred legacy binding in the same transaction.
+        """
+        customer = agreement.get("customer_reference")
+        if isinstance(customer, str) and customer.strip():
+            return customer
+        row = db.execute("SELECT * FROM outbox WHERE id=?", (agreement.get("quote_action_id"),)).fetchone()
+        if row and row["kind"] == "commerce_quote" and row["status"] == "delivered" and isinstance(row["external_ref"], str) and row["external_ref"].strip():
+            quote = json.loads(row["payload"])
+            customer = quote.get("customer_reference")
+            if (quote.get("opportunity_id") == opportunity_id
+                    and all(quote.get(key) == agreement.get(key) for key in ("scope_hash", "price_cents", "currency"))
+                    and isinstance(customer, str) and customer.strip()):
+                agreement["customer_reference"] = customer
+                return customer
+        raise CommercialError("agreement_target_unverified", "Accepted customer identity needs the original delivered quote and receipt before billing can proceed.")
+
+    @classmethod
+    def _invoice_agreement(cls, db, ledger: CommercialLedger, payload: dict) -> dict:
+        agreement = ledger.state.get("agreements", {}).get(payload["opportunity_id"])
+        if not agreement or payload.get("agreement_key") != agreement.get("quote_action_id") or any(payload.get(key) != agreement.get(key) for key in ("scope_hash", "price_cents", "currency")):
+            raise CommercialError("agreement_required", "Invoice must retain the accepted customer's exact scope and price agreement.")
+        if payload.get("customer_reference") != cls._agreement_customer(db, agreement, payload["opportunity_id"]):
+            raise CommercialError("agreement_target_changed", "Invoice recipient must match the accepted customer's original quote.")
+        return agreement
 
     def prepare_contact(self, opportunity_id: str, action_key: str, *, kind: str = "initial", experiment_id: str | None = None, now: datetime | str | None = None) -> dict:
         current = _utc(now)
@@ -437,6 +474,9 @@ class Commerce:
             merchant = self._merchant(ledger, current)
             if not any(item["opportunity_id"] == opportunity_id and item["event"] == "reply" for item in ledger.state["events"]):
                 raise CommercialError("conversation_not_established", "A customer reply or verified inbound request is required before a quote.")
+            agreement = ledger.state.get("agreements", {}).get(opportunity_id)
+            if agreement and entry["customer_reference"] != self._agreement_customer(db, agreement, opportunity_id):
+                raise CommercialError("source_target_changed", "Review the accepted customer's conversation before quoting a changed listing target.")
             payload = {"opportunity_id": opportunity_id, "business_identity": "repvblicvs", "customer_reference": entry["customer_reference"], "scope": entry["scope"], "scope_hash": entry["scope_hash"], "price_cents": price_cents, "currency": currency, "customer_facing_identifiers": merchant["customer_facing_identifiers"], "ai_disclosure": "AI-assisted production with validated deliverables", "message": f"Fixed scope quote: {currency} {price_cents / 100:.2f}. Deliverables: {'; '.join(entry['scope']['deliverables'])}. Acceptance: {'; '.join(entry['scope']['acceptance'])}. AI-assisted production with validated deliverables. Confirm this scope and price before invoicing."}
             action = self._prepare(db, action_key, "commerce_quote", payload)
             self._save(db, ledger)
@@ -450,9 +490,13 @@ class Commerce:
             if row["kind"] != "commerce_quote" or row["status"] != "delivered" or row["payload"]["opportunity_id"] != opportunity_id:
                 raise CommercialError("invalid_agreement", "Agreement must match the delivered quote for this customer.")
             payload = row["payload"]
-            agreement = {"quote_action_id": quote_action_id, "scope_hash": payload["scope_hash"], "price_cents": payload["price_cents"], "currency": payload["currency"], "customer_receipt": customer_receipt, "at": _utc(now).isoformat()}
+            if not isinstance(payload.get("customer_reference"), str) or not payload["customer_reference"].strip():
+                raise CommercialError("agreement_target_unverified", "The delivered quote must identify the accepted customer before agreement can be recorded.")
+            agreement = {"quote_action_id": quote_action_id, "scope_hash": payload["scope_hash"], "price_cents": payload["price_cents"], "currency": payload["currency"], "customer_reference": payload["customer_reference"], "customer_receipt": customer_receipt, "at": _utc(now).isoformat()}
             previous = ledger.state.setdefault("agreements", {}).get(opportunity_id)
-            if previous and any(previous[key] != agreement[key] for key in ("quote_action_id", "scope_hash", "price_cents", "currency", "customer_receipt")):
+            if previous:
+                self._agreement_customer(db, previous, opportunity_id)
+            if previous and any(previous[key] != agreement[key] for key in ("quote_action_id", "scope_hash", "price_cents", "currency", "customer_reference", "customer_receipt")):
                 raise CommercialError("agreement_conflict", "A different customer agreement is already recorded.")
             ledger.state["agreements"][opportunity_id] = previous or agreement
             ledger.record_event(opportunity_id, "agreed", amount_cents=payload["price_cents"], idempotency_key="agreement:" + quote_action_id, experiment_id=ledger.state["opportunities"][opportunity_id].get("experiment_id"), now=now)
@@ -468,11 +512,15 @@ class Commerce:
             agreement = ledger.state.get("agreements", {}).get(opportunity_id)
             if not agreement or agreement["scope_hash"] != entry["scope_hash"]:
                 raise CommercialError("agreement_required", "Customer must agree to the current scope and price before invoicing.")
+            customer = self._agreement_customer(db, agreement, opportunity_id)
             previous = next((row for row in db.execute("SELECT * FROM outbox WHERE kind='commerce_invoice'") if json.loads(row["payload"])["agreement_key"] == agreement["quote_action_id"]), None)
             if previous:
                 if previous["action_key"] != action_key: raise CommercialError("duplicate_invoice", "An invoice already exists for this agreement; reconcile it instead.")
+                self._invoice_agreement(db, ledger, json.loads(previous["payload"]))
+                self._save(db, ledger)
                 return _action(previous)
-            payload = {"opportunity_id": opportunity_id, "business_identity": "repvblicvs", "customer_reference": entry["customer_reference"], "scope": entry["scope"], "scope_hash": entry["scope_hash"], "price_cents": agreement["price_cents"], "currency": agreement["currency"], "agreement_key": agreement["quote_action_id"], "customer_agreement_receipt": agreement["customer_receipt"], "customer_facing_identifiers": merchant["customer_facing_identifiers"], "charge_automatically": False}
+            payload = {"opportunity_id": opportunity_id, "business_identity": "repvblicvs", "customer_reference": customer, "scope": entry["scope"], "scope_hash": entry["scope_hash"], "price_cents": agreement["price_cents"], "currency": agreement["currency"], "agreement_key": agreement["quote_action_id"], "customer_agreement_receipt": agreement["customer_receipt"], "customer_facing_identifiers": merchant["customer_facing_identifiers"], "charge_automatically": False}
+            self._save(db, ledger)
             return self._prepare(db, action_key, "commerce_invoice", payload)
 
     def record_event(self, opportunity_id: str, event: str, *, idempotency_key: str, amount_cents: int = 0, currency: str = "USD", experiment_id: str | None = None, now: datetime | str | None = None, receipt: str) -> dict:
@@ -539,6 +587,14 @@ class Commerce:
             else: entry = self._qualified(ledger, action["payload"]["opportunity_id"], current, accepted_obligation=action["kind"] == "commerce_invoice")
             if action["kind"] in {"commerce_contact", "commerce_inquiry", "commerce_application"} and any(entry[field] != action["payload"][field] for field in ("source_url", "customer_reference")):
                 raise CommercialError("source_target_changed", "Refresh the reviewed contact when its verified target changes.")
+            if action["kind"] == "commerce_quote":
+                if entry["customer_reference"] != action["payload"]["customer_reference"]:
+                    raise CommercialError("source_target_changed", "Review a new quote when its verified customer target changes.")
+                agreement = ledger.state.get("agreements", {}).get(action["payload"]["opportunity_id"])
+                if agreement and action["payload"]["customer_reference"] != self._agreement_customer(db, agreement, action["payload"]["opportunity_id"]):
+                    raise CommercialError("agreement_target_changed", "Quote recipient must remain the accepted customer.")
+            if action["kind"] == "commerce_invoice":
+                self._invoice_agreement(db, ledger, action["payload"])
             if action["kind"] in {"commerce_contact", "commerce_application"}:
                 route_snapshot = _submission_route(entry)
                 if action["payload"].get("submission_route") != route_snapshot or action["payload"].get("submission_route_hash") != _route_hash(route_snapshot):
@@ -556,7 +612,7 @@ class Commerce:
                     count = sum(other["kind"] == item["kind"] and other["state"] != "cancelled" and _utc(other["reserved_at"]).astimezone(ledger.timezone).date() == today for other in ledger.state["outreach"])
                     if daily_limit is not None and count >= daily_limit: raise CommercialError("daily_contact_cap", "Deferred contact exceeds the private configured limit on its actual send day.")
                     item["reserved_at"] = current.isoformat()
-                self._save(db, ledger)
+            self._save(db, ledger)
             db.execute("UPDATE outbox SET status='dispatching',updated=? WHERE id=?", (time.time(), action_id))
             Store._event(db, "commercial_dispatch_started", action_id=action_id)
         # Commit before the connector call: a crash is ambiguous, never replayed.

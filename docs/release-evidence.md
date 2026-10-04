@@ -25,3 +25,9 @@ Synthetic examples are capability demonstrations. Distinguish prepared offers, s
 ## Evidence boundaries
 
 Pattern checks cannot establish that every form of private information was detected. Review the intended public audience and exact exported content. Do not publish internal coordination, account allowance, contact lists, customer data or session reports as release evidence.
+
+Export checks inspect filenames and archive member paths as well as content.
+Recognized credentials in filenames are blocked and redacted in findings, and
+private runtime directories and database files cannot be hidden in an otherwise
+ordinary ZIP or TAR package. The same path policy applies to Git source and
+package members. These checks remain bounded pattern and path checks.
