@@ -12,6 +12,7 @@ from typing import Iterable
 
 PATTERNS = {
     "internal_session_report": re.compile(r"(?im)^\s{0,3}#\s*(?:session[- ]retro" + r"spective|team[- ]direction|executive[- ]handoff|internal[- ]coordination)\b"),
+    "private_operating_report": re.compile(r"(?im)^\s{0,3}#{1,6}\s*(?:(?:Repvblicvs\s+)?acquisition[- ](?:up" + r"date|correction|status)|(?:Repvblicvs\s+)?finishing[- ]report|next[- ]session[- ]hand" + r"off)\b"),
     "internal_operating_details": re.compile(r"(?i)(?:the own" + r"er (?:also |subsequently )?authorized existing prepaid|initial executive Fable work has a \$|real initial executive hand" + r"off cost was|root conversion oblig" + r"ations|codex-existing-credit-authoriz" + r"ation[.]json)"),
     "private_key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
     "credential": re.compile(r"(?<![\w-])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{30,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{20,})(?![\w-])"),
@@ -21,6 +22,16 @@ PATTERNS = {
     "customer_material": re.compile(r"(?i)\b(?:CUSTOMER_" + r"CONFIDENTIAL|PRIVATE_" + r"CUSTOMER_DATA|BEGIN PRIVATE " + r"CUSTOMER RECORD)\b"),
 }
 PLACEHOLDERS = {"your_api_key_here", "example_password", "replace_me_token", "changeme_password"}
+PRIVATE_REPORT_NAMES = (
+    "session-retrospective", "team-direction", "handoff-meta", "merchant-readiness",
+    "receiving-wallet", "wallet.encrypted", "acquisition-conversion-results",
+    "acquisition-update", "finishing-report", "next-session-handoff",
+)
+
+
+def private_report_name(name: str) -> bool:
+    normalized = Path(name.replace("\\", "/")).name.lower().replace("_", "-")
+    return any(part in normalized for part in PRIVATE_REPORT_NAMES)
 
 
 def scan_public_export(paths: Path | str | Iterable[Path | str], *, allowed_emails: Iterable[str] = (), private_roots: Iterable[str] = (), max_bytes: int = 50 * 1024 * 1024, max_files: int = 5000) -> dict:
@@ -46,6 +57,8 @@ def scan_public_export(paths: Path | str | Iterable[Path | str], *, allowed_emai
         nonlocal count, total
         count += 1
         total += len(data)
+        if private_report_name(name):
+            add(name, "private_operating_report_filename")
         if count > max_files or total > max_bytes:
             add(name, "scan_limit_exceeded"); return
         # Embedded archives can bypass review; inspect bounded nesting in memory.

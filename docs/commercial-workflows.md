@@ -224,3 +224,8 @@ use these reservations for exploratory work; related customer research is delive
 paths/customer markers, unsafe archives, unreviewed binary data, and audit limits.
 It reports locations/classifications without matched values. Pattern checks
 supplement substantive release review; a clean scan is not proof of complete privacy.
+
+Private operating summaries are excluded by filename and recognizable headings,
+including when renamed or placed inside a package. Public documentation describes
+the product, its verified behavior and limitations. Session reports and internal
+coordination belong outside public repositories and release artifacts.
