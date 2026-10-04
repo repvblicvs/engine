@@ -55,6 +55,31 @@ def test_packaged_internal_documentation_is_blocked(tmp_path):
     assert any(x["classification"] == "internal_operating_details" for x in report["findings"])
 
 
+def test_report_filename_blocks_even_redacted_staged_content(tmp_path):
+    repo = repository(tmp_path)
+    p = repo / ("repvblicvs-acquisition-" + "update.md")
+    p.write_text("A redacted operating summary\n")
+    git(repo, "add", p.name)
+    assert not check_git(repo, staged=True)["allowed"]
+
+
+def test_renaming_report_does_not_make_its_heading_public(tmp_path):
+    repo = repository(tmp_path)
+    p = repo / "notes.md"
+    p.write_text("# Repvblicvs acquisition " + "status — private\nRedacted\n")
+    git(repo, "add", p.name)
+    assert not check_git(repo, staged=True)["allowed"]
+
+
+def test_archive_cannot_hide_redacted_report_filename(tmp_path):
+    p = tmp_path / "fixture.whl"
+    with zipfile.ZipFile(p, "w") as archive:
+        archive.writestr("docs/FINISHING_" + "REPORT.md", "Redacted\n")
+    report = scan_public_export(p)
+    assert not report["allowed"]
+    assert any(x["classification"] == "private_operating_report_filename" for x in report["findings"])
+
+
 def test_deterministic_worker_leaves_connector_obligation_for_frontend(tmp_path):
     from repvblicvs_engine.daemon import Worker
     from repvblicvs_engine.scheduler import claim_operator

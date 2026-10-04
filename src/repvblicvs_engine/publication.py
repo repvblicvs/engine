@@ -6,10 +6,9 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
-from .privacy import scan_public_export
+from .privacy import private_report_name, scan_public_export
 
 PRIVATE_PARTS = {".private", ".claude", ".codex", ".runtime", "coordination", "inbox", "outbox", "logs"}
-PRIVATE_NAMES = ("session-retrospective", "team-direction", "handoff-meta", "merchant-readiness", "receiving-wallet", "wallet.encrypted", "acquisition-conversion-results")
 
 
 def forbidden_path(name: str) -> bool:
@@ -17,7 +16,7 @@ def forbidden_path(name: str) -> bool:
     return (path.is_absolute() or ".." in path.parts or
             any(part.lower() in PRIVATE_PARTS for part in path.parts) or
             path.name.lower() == ".env" or path.suffix.lower() in {".sqlite", ".sqlite3", ".db", ".pem", ".key"} or
-            any(item in path.name.lower() for item in PRIVATE_NAMES))
+            private_report_name(name))
 
 
 def check_git(root: Path, *, staged: bool = False, revision: str | None = None) -> dict:
