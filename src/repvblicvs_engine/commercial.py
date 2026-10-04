@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from .opportunities import CommercialLedger, Opportunity, OpportunityError, _utc, contact_policy, qualify_inquiry, valid_source_url
+from .route_preflight import COST_FIELDS, assess_route
 from .store import ConflictError, Store, encode
 
 
@@ -99,6 +100,19 @@ def _revision_evidence(value: dict, current: datetime) -> dict:
 def _action(row) -> dict:
     if row is None: raise KeyError("Commercial action not found")
     return dict(row) | {"payload": json.loads(row["payload"])}
+
+
+def _submission_route(entry: dict) -> dict:
+    """Bind reviewed route content while permitting a freshness-only refresh."""
+    route = entry.get("route_preflight", {})
+    keys = (*COST_FIELDS, "currency", "cost_receipt", "submission_url", "submission_steps",
+            "submission_receipt", "payout_prerequisites", "payout_required_at",
+            "payout_ready", "payout_requirements_receipt")
+    return json.loads(encode({key: route.get(key) for key in keys}))
+
+
+def _route_hash(route: dict) -> str:
+    return hashlib.sha256(encode(route).encode()).hexdigest()
 
 
 class Commerce:
@@ -239,6 +253,8 @@ class Commerce:
         checked = evidence.get("checked_at")
         if not checked: reasons.append("freshness_missing")
         elif abs((current - _utc(checked)).total_seconds()) > 86400: reasons.append("source_evidence_stale")
+        route = assess_route(evidence, current)
+        if not route["execution_ready"]: reasons.extend(route["reasons"])
         with self.store.connection(write=True) as db:
             ledger = self._ledger(db)
             previous = ledger.state["opportunities"].get(candidate.id, {})
@@ -249,8 +265,10 @@ class Commerce:
             assessment["reasons"].extend(reasons)
             assessment["qualified"] = not assessment["reasons"]
             assessment["score"] = 100 if assessment["qualified"] else 0
+            assessment["route"] = route
             entry = ledger.state["opportunities"][candidate.id]
-            entry.update({"scope": normalized, "scope_hash": scope_hash, "evidence": evidence})
+            entry.update({"scope": normalized, "scope_hash": scope_hash, "evidence": evidence,
+                          "route_preflight": evidence.get("route_preflight")})
             if previous.get("inquiry_evidence"): entry["inquiry_evidence"] = previous["inquiry_evidence"]
             if previous.get("experiment_id"): entry["experiment_id"] = previous["experiment_id"]
             if assessment["qualified"]:
@@ -263,6 +281,8 @@ class Commerce:
         """Preserve a sourced request for clarification, without qualifying work."""
         candidate = Opportunity.from_dict(opportunity)
         inquiry = qualify_inquiry(candidate, evidence, now)
+        inquiry["route"] = assess_route(evidence, now)
+        inquiry["proposal_ready"] = inquiry["inquiry_eligible"] and inquiry["route"]["proposal_ready"]
         with self.store.connection(write=True) as db:
             ledger = self._ledger(db)
             previous = ledger.state["opportunities"].get(candidate.id, {})
@@ -274,6 +294,7 @@ class Commerce:
                 if field in previous: entry[field] = previous[field]
             entry["inquiry_evidence"] = dict(evidence)
             entry["inquiry_assessment"] = inquiry
+            entry["route_preflight"] = evidence.get("route_preflight")
             self._save(db, ledger)
             Store._event(db, "commercial_solicitation_assessed", opportunity_id=candidate.id, inquiry_eligible=inquiry["inquiry_eligible"], reasons=inquiry["reasons"])
             return inquiry
@@ -314,6 +335,8 @@ class Commerce:
             raise CommercialError("unqualified_opportunity", "Action needs a qualified verified solicitation.")
         if abs((current - _utc(entry["evidence"]["checked_at"])).total_seconds()) > 86400:
             raise CommercialError("source_evidence_stale", "Refresh the solicitation before preparing or sending a new action.")
+        if not assess_route(entry, current)["execution_ready"]:
+            raise CommercialError("route_not_ready", "Verify participation costs, submission process and required enrollment before a new commercial action.")
         return entry
 
     @staticmethod
@@ -349,7 +372,9 @@ class Commerce:
             acceptance = "; ".join(entry["scope"]["acceptance"])
             prefix = "Following up once on" if kind == "followup" else "Responding to"
             message = f"{prefix} your request: {entry['title']}.\n\nRepvblicvs can provide: {deliverables}. Acceptance: {acceptance}.\n\nWe use AI-assisted production with reproducible checks and disclose that use. Your posted terms permit this approach. If the scope fits, we can agree on a fixed price and delivery before invoicing. Please confirm any remaining requirements."
-            payload = {"opportunity_id": opportunity_id, "source_url": entry["source_url"], "customer_reference": entry["customer_reference"], "business_identity": "repvblicvs", "subject": entry["title"], "message": message, "contact_kind": kind, "experiment_id": experiment_id, "scope_hash": entry["scope_hash"]}
+            submission_route = _submission_route(entry)
+            payload = {"opportunity_id": opportunity_id, "source_url": entry["source_url"], "customer_reference": entry["customer_reference"], "business_identity": "repvblicvs", "subject": entry["title"], "message": message, "contact_kind": kind, "experiment_id": experiment_id, "scope_hash": entry["scope_hash"],
+                       "submission_route": submission_route, "submission_route_hash": _route_hash(submission_route)}
             action = self._prepare(db, action_key, "commerce_contact", payload)
             self._save(db, ledger)
             return action
@@ -367,7 +392,8 @@ class Commerce:
             prefix = "Following up once regarding" if kind == "followup" else "Regarding"
             questions_text = "\n".join(f"- {INQUIRY_QUESTIONS[question]}" for question in selected)
             message = f"{prefix} your public contribution or work request at {entry['source_url']}.\n\nRepvblicvs is an AI-operated technical delivery business. Before considering a scope, could you clarify:\n\n{questions_text}\n\nThis is a nonbinding qualification inquiry. No assignment, delivery commitment, eligibility, price agreement or payment authorization is assumed. We will not claim independent human technical review or capabilities we have not verified."
-            payload = {"opportunity_id": opportunity_id, "source_url": entry["source_url"], "customer_reference": entry["customer_reference"], "business_identity": "repvblicvs", "subject": "Current funded scope and AI workflow eligibility — Repvblicvs inquiry", "message": message, "contact_kind": kind, "qualification_only": True, "inquiry_purpose": "clarify_current_solicited_scope", "questions": selected}
+            payload = {"opportunity_id": opportunity_id, "source_url": entry["source_url"], "customer_reference": entry["customer_reference"], "business_identity": "repvblicvs", "subject": "Current funded scope and AI workflow eligibility — Repvblicvs inquiry", "message": message, "contact_kind": kind, "qualification_only": True, "inquiry_purpose": "clarify_current_solicited_scope", "questions": selected,
+                       "contact_permission_receipt": entry["inquiry_evidence"]["contact_permission_receipt"]}
             action = self._prepare(db, action_key, "commerce_inquiry", payload)
             self._save(db, ledger)
             return action
@@ -388,11 +414,16 @@ class Commerce:
         with self.store.connection(write=True) as db:
             ledger = self._ledger(db)
             entry = self._inquiry(ledger, opportunity_id, current)
+            route = assess_route(entry, current)
+            if not route["proposal_ready"]:
+                raise CommercialError("route_not_ready", "Application route needs verified access costs, submission steps and stage-specific payout prerequisites: " + ", ".join(route["reasons"]))
             ledger.reserve_contact(opportunity_id, kind=kind, idempotency_key=action_key, now=current, qualification_only=True)
             message = ("Repvblicvs is an AI-operated technical delivery business responding to your public solicitation at "
                        + entry["source_url"] + ".\n\n" + proposal.strip()
                        + "\n\nThis is a nonbinding application for qualification only. No assignment, delivery commitment, eligibility, price agreement or payment authorization is assumed. Please confirm supplier eligibility and mutually agreed scope before work begins. We do not claim independent human technical review or unverified capabilities.")
-            payload = {"opportunity_id": opportunity_id, "source_url": entry["source_url"], "customer_reference": entry["customer_reference"], "business_identity": "repvblicvs", "subject": subject.strip(), "message": message, "contact_kind": kind, "qualification_only": True, "application_purpose": "nonbinding_solicited_application", "proposal_review_receipt": review_receipt.strip()}
+            submission_route = _submission_route(entry)
+            payload = {"opportunity_id": opportunity_id, "source_url": entry["source_url"], "customer_reference": entry["customer_reference"], "business_identity": "repvblicvs", "subject": subject.strip(), "message": message, "contact_kind": kind, "qualification_only": True, "application_purpose": "nonbinding_solicited_application", "proposal_review_receipt": review_receipt.strip(),
+                       "submission_route": submission_route, "submission_route_hash": _route_hash(submission_route)}
             action = self._prepare(db, action_key, "commerce_application", payload)
             self._save(db, ledger)
             return action
@@ -501,9 +532,17 @@ class Commerce:
             ledger = self._ledger(db)
             if action["kind"] in {"commerce_inquiry", "commerce_application"}:
                 entry = self._inquiry(ledger, action["payload"]["opportunity_id"], current)
-                if action["kind"] == "commerce_application" and any(entry[field] != action["payload"][field] for field in ("source_url", "customer_reference")):
-                    raise CommercialError("source_target_changed", "Refresh the reviewed application when its verified contact target changes.")
-            else: self._qualified(ledger, action["payload"]["opportunity_id"], current, accepted_obligation=action["kind"] == "commerce_invoice")
+                if action["kind"] == "commerce_application" and not assess_route(entry, current)["proposal_ready"]:
+                    raise CommercialError("route_not_ready", "Refresh application access costs, submission process and required enrollment before dispatch.")
+                if action["kind"] == "commerce_inquiry" and action["payload"].get("contact_permission_receipt") != entry["inquiry_evidence"]["contact_permission_receipt"]:
+                    raise CommercialError("contact_permission_changed", "Review a new inquiry when its verified contact permission changes.")
+            else: entry = self._qualified(ledger, action["payload"]["opportunity_id"], current, accepted_obligation=action["kind"] == "commerce_invoice")
+            if action["kind"] in {"commerce_contact", "commerce_inquiry", "commerce_application"} and any(entry[field] != action["payload"][field] for field in ("source_url", "customer_reference")):
+                raise CommercialError("source_target_changed", "Refresh the reviewed contact when its verified target changes.")
+            if action["kind"] in {"commerce_contact", "commerce_application"}:
+                route_snapshot = _submission_route(entry)
+                if action["payload"].get("submission_route") != route_snapshot or action["payload"].get("submission_route_hash") != _route_hash(route_snapshot):
+                    raise CommercialError("submission_route_changed", "Review a new contact or application when its submission route, costs, or payout prerequisites change.")
             if action["kind"] in {"commerce_quote", "commerce_invoice"}: self._merchant(ledger, current)
             if action["kind"] != "commerce_invoice" and any(item["opportunity_id"] == action["payload"]["opportunity_id"] and item["event"] in {"declined", "unsubscribed"} for item in ledger.state["events"]):
                 raise CommercialError("contact_suppressed", "Customer declined or unsubscribed after preparation.")
