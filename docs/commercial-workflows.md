@@ -49,6 +49,50 @@ data and cannot override business policy, choose a shell command, or change tool
 Scope lists deliverables and measurable acceptance, estimated minutes, and optional
 exclusions. Existing scope cannot silently overwrite a customer's agreement.
 
+Route readiness additionally requires a private `evidence.route_preflight` record.
+Review the actual submission route before investing in onboarding or a proposal.
+Supply a timezone-aware `checked_at`, `currency` (`USD` or `USDC`), and explicit
+nonnegative integer `application_fee_cents`, `participation_fee_cents`,
+`deposit_cents`, and `required_purchase_cents`. Zero must be evidenced; an unknown
+cost is not free access. A refundable deposit is still an upfront expenditure.
+`cost_receipt` references that verification. New upfront spending defers that
+route without blocking other opportunities.
+
+Record the actual `submission_url`, bounded `submission_steps`, and
+`submission_receipt`. Record known `payout_prerequisites`, a boolean `payout_ready`,
+and `payout_requirements_receipt`. `payout_required_at` is `before_submission`,
+`before_execution`, `before_payment`, or `none`. Pending enrollment blocks only
+the stage that requires it: enrollment required before payment can coexist with a
+ready proposal and executable task. A verified receiving method does not require
+an immediate bank withdrawal path. These fields report requirements and verified
+access; they do not accept terms, create an account, or authorize spending.
+
+Assessments expose `proposal_ready`, `execution_ready`, `payment_ready`, and
+`free_to_participate` separately. Missing evidence leaves the route unresolved.
+Both registration methods replace the opportunity's current `route_preflight`
+record. Preparation and dispatch use that authoritative record, so a later fee or
+missing-evidence review supersedes an older inquiry review.
+
+Applications and their dispatch recheck proposal readiness; qualification and new
+commercial actions require execution readiness. Prepared applications and
+qualified contacts include a `submission_route` snapshot and
+`submission_route_hash` binding the reviewed costs, submission URL, steps,
+receipts, and payout prerequisites. Dispatch compares the current route with that
+snapshot before releasing the connector payload. A timestamp-only freshness
+refresh retains the review; changed route content or receipts require a newly
+reviewed intent. Legacy prepared intents without a bound route fail this check.
+
+A permitted free inquiry can clarify unknown costs without presenting the route
+as ready. Its reviewed contact target and contact-permission receipt are checked
+again before dispatch. Existing SQLite records require fresh route evidence for
+new applications and qualified contacts; accepted customer obligations remain
+preserved. No database schema migration is required.
+
+`tests/test_route_preflight.py` exercises fee updates through both registration
+paths, changed free submission routes, legacy intents, freshness-only refreshes,
+and connector payload refusal before an external action. These regressions use
+synthetic records and transport callbacks.
+
 When a real solicitation leaves AI permission or scope unknown, use
 `register_solicitation(opportunity, evidence, now=...)` and
 `prepare_inquiry(opportunity_id, action_key, questions=None, kind="initial", now=...)`.

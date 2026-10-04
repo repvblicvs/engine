@@ -19,8 +19,18 @@ def source(number=0):
     return {"source_url": f"https://example.com/request/{number}", "title": f"CSV repair {number}", "source_quote": "Please repair this CSV; AI-assisted delivery is allowed.", "category": "data", "ai_permission": "allowed", "solicited": True, "risk": "low", "capability": "csv_cleanup", "customer_reference": f"source-request-{number}"}
 
 
+def route_evidence(now=NOW, **changes):
+    return {"checked_at": now.isoformat(), "currency": "USD", "application_fee_cents": 0,
+            "participation_fee_cents": 0, "deposit_cents": 0, "required_purchase_cents": 0,
+            "cost_receipt": "synthetic-zero-access-cost-review", "submission_url": "https://example.com/submit",
+            "submission_steps": ["Send the reviewed proposal through the published submission form"],
+            "submission_receipt": "synthetic-submission-process-review", "payout_prerequisites": [],
+            "payout_required_at": "none", "payout_ready": True,
+            "payout_requirements_receipt": "synthetic-payout-requirements-review", **changes}
+
+
 def evidence(now=NOW, **changes):
-    return {"source_read_receipt": "synthetic-source-read", "scope_receipt": "synthetic-scope-review", "ai_permission_receipt": "synthetic-ai-terms", "currently_open": True, "checked_at": now.isoformat(), **changes}
+    return {"source_read_receipt": "synthetic-source-read", "scope_receipt": "synthetic-scope-review", "ai_permission_receipt": "synthetic-ai-terms", "currently_open": True, "checked_at": now.isoformat(), "route_preflight": route_evidence(now), **changes}
 
 
 def ready(tmp_path, number=0):

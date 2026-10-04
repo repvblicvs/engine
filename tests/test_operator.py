@@ -4,6 +4,7 @@ import pytest
 from repvblicvs_engine.commercial import Commerce
 from repvblicvs_engine.operator import ConnectorBridge
 from repvblicvs_engine.store import Store
+from test_commercial import route_evidence
 
 
 def fixture(tmp_path):
@@ -17,7 +18,8 @@ def fixture(tmp_path):
          'risk': 'low', 'capability': 'csv_cleanup', 'customer_reference': 'synthetic-customer'},
         {'deliverables': ['CSV and replay script'], 'acceptance': ['Replayed totals'], 'estimated_minutes': 30},
         {'source_read_receipt': 'synthetic-read', 'scope_receipt': 'synthetic-scope',
-         'ai_permission_receipt': 'synthetic-terms', 'currently_open': True, 'checked_at': now},
+         'ai_permission_receipt': 'synthetic-terms', 'currently_open': True, 'checked_at': now,
+         'route_preflight': route_evidence(datetime.fromisoformat(now))},
         {'csv_cleanup'})
     action = commerce.prepare_contact(result['opportunity_id'], 'synthetic-contact')
     return store, action

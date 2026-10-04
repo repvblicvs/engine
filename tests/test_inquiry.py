@@ -6,7 +6,7 @@ import pytest
 from repvblicvs_engine.commercial import Commerce, CommercialError
 from repvblicvs_engine.opportunities import OpportunityError
 from repvblicvs_engine.store import Store
-from test_commercial import NOW, SCOPE, FakeTransport, evidence, ready, source
+from test_commercial import NOW, SCOPE, FakeTransport, evidence, ready, route_evidence, source
 
 
 def request(number=0, **changes):
@@ -14,7 +14,7 @@ def request(number=0, **changes):
 
 
 def inquiry_evidence(now=NOW, **changes):
-    return {"source_read_receipt": "synthetic-primary-source-read", "solicitation_receipt": "synthetic-current-solicitation", "contact_permission_receipt": "synthetic-official-public-contact", "currently_open": True, "archived": False, "public_contact_permitted": True, "checked_at": now.isoformat(), **changes}
+    return {"source_read_receipt": "synthetic-primary-source-read", "solicitation_receipt": "synthetic-current-solicitation", "contact_permission_receipt": "synthetic-official-public-contact", "currently_open": True, "archived": False, "public_contact_permitted": True, "checked_at": now.isoformat(), "route_preflight": route_evidence(now), **changes}
 
 
 def inquiry_ready(tmp_path, number=0):
