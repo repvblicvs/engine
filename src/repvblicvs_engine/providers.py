@@ -9,9 +9,10 @@ import json
 import hashlib
 import time
 from .store import Store, ConflictError, encode
+from .agy_adapter import MODEL as GEMINI_MODEL
 
 ROUTE_ORDER = ("fable", "opus", "sol", "gemini", "copilot")
-DEFAULT_MODELS = {"fable": "fable-5.1", "opus": "opus-5.5", "sol": "gpt-sol-6.1", "gemini": "gemini", "copilot": "copilot"}
+DEFAULT_MODELS = {"fable": "fable-5.1", "opus": "claude-opus-5-5", "sol": "gpt-6.1-sol", "gemini": GEMINI_MODEL, "copilot": "auto"}
 
 
 class ProviderUnavailable(RuntimeError):
