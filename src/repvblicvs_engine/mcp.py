@@ -6,8 +6,10 @@ No credentials, unrestricted shell execution, or payment dispatch tools are expo
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
+from pathlib import Path
 import stat
 import sys
 from .providers import Router
@@ -75,11 +77,26 @@ class Server:
         if name == "engine_artifacts":
             return self.store.artifacts(arguments.get("task_id"))
         if name == "engine_read_artifact":
-            path = self.store.artifact_root / arguments["path"]
-            actual = path.resolve()
-            if not actual.is_relative_to(self.store.artifact_root.resolve()) or path.is_symlink():
+            relative = Path(arguments["path"])
+            if relative.is_absolute() or ".." in relative.parts or not relative.parts:
                 raise ValueError("Artifact path escapes private artifact storage")
-            descriptor = os.open(actual, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            # Resolve every component relative to an already-open directory.
+            # O_NOFOLLOW on the leaf alone cannot fence a replaced ancestor.
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            try:
+                directory = os.open(self.store.artifact_root, directory_flags)
+                try:
+                    for component in relative.parts[:-1]:
+                        child = os.open(component, directory_flags, dir_fd=directory)
+                        os.close(directory)
+                        directory = child
+                    descriptor = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                finally:
+                    os.close(directory)
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise ValueError("Artifact paths cannot contain symlinks or non-directory ancestors") from exc
+                raise
             with os.fdopen(descriptor, "rb") as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode) or info.st_size > 1_000_000:
@@ -104,11 +121,11 @@ class Server:
             return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str):
             return error(-32600, "Invalid Request")
+        if "id" not in request:
+            return None
         method, params = request["method"], request.get("params", {})
         if not isinstance(params, dict):
             return error(-32602, "Invalid params")
-        if "id" not in request:
-            return None
         if method == "initialize":
             requested = params.get("protocolVersion")
             supported = {"2024-11-05", "2025-03-26", "2025-06-18"}

@@ -79,7 +79,7 @@ class AllowanceTests(unittest.TestCase):
     def test_credits_without_trusted_owner_authorization_are_rejected(self):
         now = time.time()
         parsed = normalize(credit_limits(now), now)
-        for key, value in (("authorized", False), ("authorized", 1), ("scope", "new_credits"), ("purchases_allowed", True), ("refill_allowed", True), ("reserve_credits", 49), ("initial_balance", True), ("max_balance_to_use", float("nan")), ("max_balance_to_use", 71), ("authorization_receipt", "")):
+        for key, value in (("authorized", False), ("authorized", 1), ("scope", "new_credits"), ("purchases_allowed", True), ("refill_allowed", True), ("reserve_credits", -1), ("initial_balance", True), ("max_balance_to_use", float("nan")), ("max_balance_to_use", 71), ("authorization_receipt", "")):
             with self.subTest(key=key, value=value):
                 self.assertFalse(dispatch_decision(parsed, now=now, credit_policy=owner_policy() | {key: value})[0])
         self.assertFalse(dispatch_decision(parsed, now=now)[0])
@@ -120,6 +120,20 @@ class AllowanceTests(unittest.TestCase):
         self.assertFalse(dispatch_decision(parsed, now=now, credit_policy=owner_policy(), observed_depletion_credits=70)[0])
         self.assertFalse(dispatch_decision(parsed, now=now, credit_policy=owner_policy(), observed_depletion_credits=float("nan"))[0])
         self.assertFalse(dispatch_decision(parsed, now=now, credit_policy=owner_policy(), observed_depletion_credits=True)[0])
+
+    def test_explicit_owner_zero_reserve_uses_only_authorized_existing_balance(self):
+        now = time.time()
+        policy = owner_policy() | {"reserve_credits": 0, "max_balance_to_use": 120}
+        parsed = normalize(credit_limits(now, "0.25"), now)
+        decision = routing_decision(parsed, now=now, credit_policy=policy, observed_depletion_credits=119.75)
+        self.assertTrue(decision["allowed"])
+        self.assertEqual(decision["credit_reserve"], 0)
+        self.assertEqual(decision["remaining_authorized_credits"], 0.25)
+        self.assertFalse(routing_decision(parsed, now=now)["allowed"])
+        self.assertFalse(routing_decision(parsed, now=now, credit_policy=policy | {"purchases_allowed": True})["allowed"])
+        self.assertFalse(routing_decision(parsed, now=now, credit_policy=policy | {"refill_allowed": True})["allowed"])
+        self.assertFalse(routing_decision(normalize(credit_limits(now, "0"), now), now=now, credit_policy=policy)["allowed"])
+        self.assertFalse(routing_decision(parsed, now=now, credit_policy=policy, observed_depletion_credits=120)["allowed"])
 
     def test_cumulative_unattributed_credit_ledger_survives_refill_and_restart(self):
         with tempfile.TemporaryDirectory() as directory:

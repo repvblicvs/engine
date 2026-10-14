@@ -114,7 +114,10 @@ class Worker:
     def _step_locked(self, slot_fd) -> dict | None:
         # Trusted frontends own connector obligations; deterministic workers
         # must not consume their attempts or mislabel them unsupported.
-        task = self.store.claim(self.owner, self.lease_seconds, exclude_kinds=("operator_review",))
+        # A late heartbeat from an earlier step must never authenticate as a
+        # later claim made by this same worker instance.
+        owner = f"{self.owner}:claim-{uuid.uuid4().hex}"
+        task = self.store.claim(owner, self.lease_seconds, exclude_kinds=("operator_review",))
         if task is None:
             return None
         task_id = task["id"]
@@ -124,7 +127,7 @@ class Worker:
         def heartbeat():
             while not stopped.wait(max(0.01, self.lease_seconds / 3)):
                 try:
-                    self.store.renew(task_id, self.owner, self.lease_seconds)
+                    self.store.renew(task_id, owner, self.lease_seconds)
                 except Exception:
                     lease_lost.set()
                     return
@@ -133,8 +136,9 @@ class Worker:
         heartbeat_thread.start()
         commerce, execution_id, executed_at, capacity_recorded = None, None, None, False
         try:
-            if task["checkpoint"] and task["checkpoint"].get("phase") == "workflow_finished":
-                return self.store.complete(task_id, self.owner, task["checkpoint"]["result"])
+            checkpoint = task["checkpoint"]
+            if isinstance(checkpoint, dict) and checkpoint.get("phase") == "workflow_finished" and "result" in checkpoint:
+                return self.store.complete(task_id, owner, checkpoint["result"])
             if task["kind"] != "operator_review":
                 from .commercial import Commerce, CommercialError
                 commerce = Commerce(self.store)
@@ -156,7 +160,7 @@ class Worker:
             output_dir = self.store.artifact_root / task_id / f"attempt-{task['attempts']}"
             output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(output_dir, 0o700)
-            self.store.checkpoint(task_id, self.owner, {"phase": "workflow_started", "attempt": task["attempts"]})
+            self.store.checkpoint(task_id, owner, {"phase": "workflow_started", "attempt": task["attempts"]})
             if task["kind"] == "model_instruction":
                 from .executor import run_model_instruction
                 result = run_model_instruction(self.store, task, output_dir, inherited_fds=(slot_fd,))
@@ -176,17 +180,22 @@ class Worker:
                     result["execution_capacity"] = {"id": execution_id, "classification": capacity["classification"], "actual_seconds": capacity["actual_units"], "status": capacity["status"]}
             if lease_lost.is_set():
                 raise LeaseError("Lease lost during execution; artifacts retained for recovery")
-            self.store.checkpoint(task_id, self.owner, {"phase": "workflow_finished", "result": result})
-            return self.store.complete(task_id, self.owner, result)
+            self.store.checkpoint(task_id, owner, {"phase": "workflow_finished", "result": result})
+            return self.store.complete(task_id, owner, result)
         except LeaseError:
             return self.store.get_task(task_id)
         except Exception as error:
             code = getattr(error, "code", "")
             message = getattr(error, "message", str(error))
             # Unsupported kinds are a capability gap, not a transient exception.
-            if code in {"unknown_kind", "unknown_workflow", "unsupported", "capability_unavailable", "unsupported_workflow", "research_capacity", "customer_work_pending", "research_overrun", "research_timeout"} or isinstance(error, NotImplementedError):
-                return self.store.defer(task_id, self.owner, f"{code or 'unsupported'}: {message}")
-            return self.store.fail(task_id, self.owner, f"{type(error).__name__}: {message}", retryable=not isinstance(error, (ValueError, FileNotFoundError, PermissionError)))
+            try:
+                if code in {"unknown_kind", "unknown_workflow", "unsupported", "capability_unavailable", "unsupported_workflow", "research_capacity", "customer_work_pending", "research_overrun", "research_timeout"} or isinstance(error, NotImplementedError):
+                    return self.store.defer(task_id, owner, f"{code or 'unsupported'}: {message}")
+                return self.store.fail(task_id, owner, f"{type(error).__name__}: {message}", retryable=not isinstance(error, (ValueError, FileNotFoundError, PermissionError)))
+            except LeaseError:
+                # Another claim may already own recovery. Its state wins over
+                # this expired attempt's failure or capability-gap report.
+                return self.store.get_task(task_id)
         finally:
             stopped.set()
             heartbeat_thread.join(timeout=2)

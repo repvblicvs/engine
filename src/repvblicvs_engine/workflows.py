@@ -431,7 +431,8 @@ def run_workflow(kind: str, payload: dict, output_dir: Path) -> dict:
         raise WorkflowError("unsupported_field", "A requested illustration attribute is unavailable.")
     functions = {"csv_cleanup": _csv_cleanup, "document_package": _document_package, "research_sequence": _research_sequence}
     if kind in {"json_preflight", "catalog_inspect"}:
-        from .inspection import run_inspection
+        from .inspection import run_inspection, validate_inspection
+        validate_inspection(kind, payload)
         functions[kind] = lambda value, directory: run_inspection(kind, value, directory)
     if kind not in functions: raise WorkflowError("unsupported_workflow", "Workflow kind is not available.")
     output = Path(output_dir)

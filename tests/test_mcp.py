@@ -1,7 +1,10 @@
 import io
 import json
+import os
+from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from repvblicvs_engine.mcp import Server
 from repvblicvs_engine.store import Store
 
@@ -47,6 +50,34 @@ class McpTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.server.call_tool("engine_read_artifact", {"path": "safe.txt"})
 
+    def test_artifact_ancestor_replacement_cannot_change_opened_directory(self):
+        parent = self.store.artifact_root / "nested"
+        parent.mkdir()
+        (parent / "safe.txt").write_text("safe artifact")
+        outside = Path(self.directory.name) / "outside"
+        outside.mkdir()
+        (outside / "safe.txt").write_text("synthetic outside data")
+        original_open = os.open
+
+        def replace_parent_at_leaf_open(path, flags, *args, **kwargs):
+            if Path(path).name == "safe.txt":
+                parent.rename(parent.with_name("original-nested"))
+                parent.symlink_to(outside, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        with patch("repvblicvs_engine.mcp.os.open", side_effect=replace_parent_at_leaf_open):
+            result = self.server.call_tool("engine_read_artifact", {"path": "nested/safe.txt"})
+        self.assertEqual(result["text"], "safe artifact")
+
+    def test_artifact_reads_reject_symlink_ancestors_and_absolute_paths(self):
+        directory = self.store.artifact_root / "original"
+        directory.mkdir()
+        (directory / "safe.txt").write_text("fixture")
+        (self.store.artifact_root / "alias").symlink_to(directory, target_is_directory=True)
+        for value in ("alias/safe.txt", str(directory / "safe.txt"), "."):
+            with self.assertRaises(ValueError):
+                self.server.call_tool("engine_read_artifact", {"path": value})
+
     def test_tool_invalid_arguments_are_errors(self):
         for arguments in ({"mode": "invalid"}, {"mode": "paused", "extra": True}, {}):
             reply = self.request("tools/call", {"name": "engine_control", "arguments": arguments})
@@ -62,6 +93,21 @@ class McpTests(unittest.TestCase):
         self.assertEqual(len(messages), 2)
         self.assertEqual(messages[0]["error"]["code"], -32700)
         self.assertEqual(messages[1]["result"], {})
+
+    def test_malformed_notification_params_do_not_produce_responses(self):
+        messages = [
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": []},
+            {"jsonrpc": "2.0", "method": "tools/call", "params": None},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping", "params": []},
+            {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+        ]
+        incoming = io.StringIO("\n".join(json.dumps(value) for value in messages) + "\n")
+        outgoing = io.StringIO()
+        self.server.serve(incoming, outgoing)
+        replies = [json.loads(line) for line in outgoing.getvalue().splitlines()]
+        self.assertEqual([reply["id"] for reply in replies], [2, 3])
+        self.assertEqual(replies[0]["error"]["code"], -32602)
+        self.assertEqual(replies[1]["result"], {})
 
 
 if __name__ == "__main__":

@@ -80,6 +80,17 @@ def test_archive_cannot_hide_redacted_report_filename(tmp_path):
     assert any(x["classification"] == "private_operating_report_filename" for x in report["findings"])
 
 
+def test_staged_credential_filename_is_blocked_with_public_content(tmp_path):
+    repo = repository(tmp_path)
+    secret = "gh" + "p_" + "Z" * 36
+    p = repo / (secret + ".txt")
+    p.write_text("Ordinary public text\n")
+    git(repo, "add", p.name)
+    report = check_git(repo, staged=True)
+    assert not report["allowed"]
+    assert secret not in str(report)
+
+
 def test_deterministic_worker_leaves_connector_obligation_for_frontend(tmp_path):
     from repvblicvs_engine.daemon import Worker
     from repvblicvs_engine.scheduler import claim_operator

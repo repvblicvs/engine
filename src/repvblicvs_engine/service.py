@@ -42,6 +42,27 @@ def agent_path() -> Path:
     return Path.home() / "Library/LaunchAgents" / (LABEL + ".plist")
 
 
+def _loaded() -> bool:
+    result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    if result.returncode == 0:
+        return True
+    # Only an explicit missing job proves absence. Domain/permission failures
+    # must not authorize replacing or removing a possibly running service.
+    missing = f'Could not find service "{LABEL}" in domain for user gui: {os.getuid()}'.encode()
+    if result.returncode == 113 and missing in result.stderr.splitlines():
+        return False
+    raise RuntimeError("Unable to verify launchd engine state; installed configuration preserved")
+
+
+def _unload():
+    """Leave the installed configuration intact if its live job cannot stop."""
+    result = subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError("launchd refused to unload the engine; installed configuration preserved")
+    if _loaded():
+        raise RuntimeError("Engine remains loaded after bootout; installed configuration preserved")
+
+
 def install(root: str | Path | None = None, python: str | None = None) -> dict:
     if sys.platform != "darwin":
         raise RuntimeError("launchd service installation is macOS only")
@@ -50,25 +71,35 @@ def install(root: str | Path | None = None, python: str | None = None) -> dict:
     target.parent.mkdir(parents=True, exist_ok=True)
     document = plist_document(python or sys.executable, store.root)
     encoded = plistlib.dumps(document)
-    if target.exists() and target.read_bytes() != encoded:
-        backup = store.root / "previous-launch-agent.plist"
-        if not backup.exists():
-            shutil.copy2(target, backup)
-            os.chmod(backup, 0o600)
-        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
-    target.write_bytes(encoded)
+    previous = target.read_bytes() if target.exists() else None
+    loaded = _loaded()
+    if previous != encoded:
+        if loaded:
+            _unload()
+            loaded = False
+        if previous is not None:
+            backup = store.root / "previous-launch-agent.plist"
+            if not backup.exists():
+                descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(previous)
+        target.write_bytes(encoded)
     os.chmod(target, 0o600)
     domain = f"gui/{os.getuid()}"
-    existing = subprocess.run(["launchctl", "print", f"{domain}/{LABEL}"], capture_output=True)
-    if existing.returncode != 0:
-        subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True, capture_output=True)
-    return {"installed": True, "label": LABEL, "agent": str(target), "state_dir": str(store.root)}
+    if not loaded:
+        result = subprocess.run(["launchctl", "bootstrap", domain, str(target)], capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError("launchd refused to load the engine; configuration retained for retry")
+        if not _loaded():
+            raise RuntimeError("Engine load could not be verified; configuration retained for retry")
+    return {"installed": True, "loaded": True, "label": LABEL, "agent": str(target), "state_dir": str(store.root)}
 
 
 def uninstall() -> dict:
     if sys.platform != "darwin":
         raise RuntimeError("launchd service removal is macOS only")
-    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    if _loaded():
+        _unload()
     target = agent_path()
     target.unlink(missing_ok=True)
     return {"installed": False, "runtime_preserved": True}
@@ -78,9 +109,8 @@ def inspect() -> dict:
     target = agent_path()
     if sys.platform != "darwin":
         return {"supported": False, "installed": False}
-    process = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, text=True)
     # Avoid printing launchctl's complete environment.
-    return {"supported": True, "installed": target.exists(), "loaded": process.returncode == 0, "label": LABEL}
+    return {"supported": True, "installed": target.exists(), "loaded": _loaded(), "label": LABEL}
 
 
 def _bounded_pipe(pipe, target: Path, maximum: int = 1_000_000):

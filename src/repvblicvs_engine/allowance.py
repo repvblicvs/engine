@@ -44,7 +44,7 @@ def _validated_credit_policy(policy: dict | None) -> dict | None:
     reserve = _finite_number(policy.get("reserve_credits"))
     maximum = _finite_number(policy.get("max_balance_to_use"))
     receipt = policy.get("authorization_receipt")
-    if initial is None or reserve is None or maximum is None or reserve < 50 or maximum <= 0 or initial <= reserve or maximum > initial - reserve or not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 200:
+    if initial is None or reserve is None or maximum is None or reserve < 0 or maximum <= 0 or initial <= reserve or maximum > initial - reserve or not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 200:
         return None
     return {"authorized": True, "scope": "existing_codex_balance", "initial_balance": initial, "reserve_credits": reserve, "max_balance_to_use": maximum, "authorization_receipt": receipt, "purchases_allowed": False, "refill_allowed": False}
 

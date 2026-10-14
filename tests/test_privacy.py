@@ -71,3 +71,44 @@ def test_private_filenames_are_redacted_in_every_finding(tmp_path):
     assert not report["allowed"]
     assert address not in str(report)
     assert all(item["file"] == "[redacted filename]" for item in report["findings"])
+
+
+def test_credentials_in_export_filenames_are_blocked_and_redacted(tmp_path):
+    secret = "gh" + "p_" + "Z" * 36
+    path = tmp_path / (secret + ".txt")
+    path.write_text("Ordinary public text\n")
+    report = scan_public_export(path)
+    assert not report["allowed"]
+    assert any(item["classification"] == "private_filename" for item in report["findings"])
+    assert secret not in str(report)
+    archive_path = tmp_path / "package.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(secret + ".txt", "Ordinary public text\n")
+    report = scan_public_export(archive_path)
+    assert not report["allowed"]
+    assert secret not in str(report)
+
+
+def test_runtime_paths_are_blocked_in_direct_exports_and_archive_members(tmp_path):
+    directory = tmp_path / ".private"
+    directory.mkdir()
+    private_file = directory / "runtime.json"
+    private_file.write_text('{"setting": "synthetic private state"}')
+    assert not scan_public_export(private_file)["allowed"]
+    assert not scan_public_export(directory)["allowed"]
+    assert not scan_public_export(tmp_path)["allowed"]
+    for archive_name in ("package.zip", "package.tar"):
+        archive_path = tmp_path / archive_name
+        contents = b'{"setting": "synthetic private state"}'
+        if archive_path.suffix == ".zip":
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr(".private/runtime.json", contents)
+                archive.writestr("package/.env", "synthetic setting")
+        else:
+            with tarfile.open(archive_path, "w") as archive:
+                member = tarfile.TarInfo(".private/runtime.json")
+                member.size = len(contents)
+                archive.addfile(member, io.BytesIO(contents))
+        report = scan_public_export(archive_path)
+        assert not report["allowed"]
+        assert any(item["classification"] == "private_or_unsupported_export_path" for item in report["findings"])

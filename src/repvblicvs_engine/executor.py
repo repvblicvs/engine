@@ -23,11 +23,11 @@ import time
 
 from .allowance import codex_binary, refresh_sol, safe_environment
 from . import agy_adapter
-from .providers import Router, ProviderUnavailable
+from .providers import DEFAULT_MODELS, Router, ProviderUnavailable
 from .store import encode
 from .workflows import WorkflowError
 
-SUPPORTED = {"opus": "claude-opus-5-5", "sol": "gpt-6.1-sol", "gemini": agy_adapter.MODEL, "copilot": "auto"}
+SUPPORTED = {name: DEFAULT_MODELS[name] for name in ("opus", "sol", "gemini", "copilot")}
 
 
 class ProcessNotStarted(OSError):

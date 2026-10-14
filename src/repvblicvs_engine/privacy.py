@@ -27,11 +27,21 @@ PRIVATE_REPORT_NAMES = (
     "receiving-wallet", "wallet.encrypted", "acquisition-conversion-results",
     "acquisition-update", "finishing-report", "next-session-handoff",
 )
+PRIVATE_PARTS = {".private", ".claude", ".codex", ".runtime", "coordination", "inbox", "outbox", "logs"}
 
 
 def private_report_name(name: str) -> bool:
     normalized = Path(name.replace("\\", "/")).name.lower().replace("_", "-")
     return any(part in normalized for part in PRIVATE_REPORT_NAMES)
+
+
+def forbidden_public_path(name: str) -> bool:
+    """Apply the same private-path policy to Git sources and package members."""
+    path = Path(name.replace("\\", "/"))
+    return (path.is_absolute() or ".." in path.parts or
+            any(part.lower() in PRIVATE_PARTS for part in path.parts) or
+            path.name.lower() == ".env" or path.suffix.lower() in {".sqlite", ".sqlite3", ".db", ".pem", ".key"} or
+            private_report_name(name))
 
 
 def scan_public_export(paths: Path | str | Iterable[Path | str], *, allowed_emails: Iterable[str] = (), private_roots: Iterable[str] = (), max_bytes: int = 50 * 1024 * 1024, max_files: int = 5000) -> dict:
@@ -53,12 +63,19 @@ def scan_public_export(paths: Path | str | Iterable[Path | str], *, allowed_emai
         if line is not None: finding["line"] = line
         if finding not in findings: findings.append(finding)
 
-    def inspect(name: str, data: bytes, depth: int = 0) -> None:
+    def inspect_name(name: str, export_path: str | None = None) -> None:
+        if forbidden_public_path(export_path if export_path is not None else name):
+            add(name, "private_or_unsupported_export_path")
+        if private_report_name(name):
+            add(name, "private_operating_report_filename")
+        if PATTERNS["email"].search(name) or PATTERNS["credential"].search(name):
+            add(name, "private_filename")
+
+    def inspect(name: str, data: bytes, depth: int = 0, export_path: str | None = None) -> None:
         nonlocal count, total
         count += 1
         total += len(data)
-        if private_report_name(name):
-            add(name, "private_operating_report_filename")
+        inspect_name(name, export_path)
         if count > max_files or total > max_bytes:
             add(name, "scan_limit_exceeded"); return
         # Embedded archives can bypass review; inspect bounded nesting in memory.
@@ -72,24 +89,26 @@ def scan_public_export(paths: Path | str | Iterable[Path | str], *, allowed_emai
                     with zipfile.ZipFile(io.BytesIO(data)) as archive:
                         for member in archive.infolist():
                             member_name = name + "!" + member.filename
+                            inspect_name(member_name, member.filename)
                             if member.is_dir(): continue
                             mode = (member.external_attr >> 16) & 0o170000
                             if member.filename.startswith(("/", "\\")) or ".." in Path(member.filename.replace("\\", "/")).parts: add(member_name, "archive_unsafe_path"); continue
                             if mode == 0o120000: add(member_name, "symlink_not_audited"); continue
                             if member.flag_bits & 1: add(member_name, "encrypted_archive_member"); continue
                             if member.file_size > max_bytes - total: add(member_name, "scan_limit_exceeded"); continue
-                            inspect(member_name, archive.read(member), depth + 1)
+                            inspect(member_name, archive.read(member), depth + 1, member.filename)
                 else:
                     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
                         for member in archive:
                             member_name = name + "!" + member.name
+                            inspect_name(member_name, member.name)
                             if member.isdir(): continue
                             if not member.isfile(): add(member_name, "archive_special_file"); continue
                             if member.name.startswith(("/", "\\")) or ".." in Path(member.name.replace("\\", "/")).parts: add(member_name, "archive_unsafe_path"); continue
                             if member.size > max_bytes - total: add(member_name, "scan_limit_exceeded"); continue
                             stream = archive.extractfile(member)
                             if stream is None: add(member_name, "archive_unreadable_member"); continue
-                            inspect(member_name, stream.read(), depth + 1)
+                            inspect(member_name, stream.read(), depth + 1, member.name)
             except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, tarfile.TarError): add(name, "archive_unreadable")
             return
         try:
@@ -104,16 +123,20 @@ def scan_public_export(paths: Path | str | Iterable[Path | str], *, allowed_emai
                 add(name, classification, text.count("\n", 0, match.start()) + 1)
         for root in roots:
             if root in text: add(name, "private_root", text.count("\n", 0, text.index(root)) + 1)
-        # Sensitive filenames are also an export concern; values remain redacted.
-        if PATTERNS["email"].search(name): add("[redacted filename]", "private_filename")
 
     for item in paths:
         base = Path(item)
+        inspect_name(base.name)
+        # A selected leaf still belongs to its enclosing private directory.
+        # Absolute input locations are allowed; private components are not.
+        if any(part.lower() in PRIVATE_PARTS for part in base.parts):
+            add(base.name, "private_or_unsupported_export_path")
         if not base.exists() and not base.is_symlink():
             add(base.name, "missing_input"); continue
         entries = sorted(base.rglob("*")) if base.is_dir() and not base.is_symlink() else [base]
         for path in entries:
             name = str(path.relative_to(base)) if base.is_dir() else path.name
+            inspect_name(name)
             if path.is_symlink(): add(name, "symlink_not_audited"); continue
             if not path.is_file(): continue
             try:
